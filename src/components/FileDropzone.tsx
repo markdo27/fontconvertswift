@@ -3,22 +3,18 @@ import {
   UploadCloud, 
   FolderPlus, 
   FileText, 
-  Sparkles, 
   ShieldCheck, 
   Zap, 
-  ArrowRightLeft,
-  CheckCircle2
+  ArrowRightLeft
 } from 'lucide-react';
 
 interface FileDropzoneProps {
   onFilesSelected: (files: File[]) => void;
-  onLoadDemoFonts: () => void;
   isLoading: boolean;
 }
 
 export const FileDropzone: React.FC<FileDropzoneProps> = ({
   onFilesSelected,
-  onLoadDemoFonts,
   isLoading
 }) => {
   const [isDragOver, setIsDragOver] = useState(false);
@@ -110,7 +106,7 @@ export const FileDropzone: React.FC<FileDropzoneProps> = ({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={() => fileInputRef.current?.click()}
-        className={`relative group rounded-3xl border-2 border-dashed transition-all duration-300 p-8 sm:p-10 text-center cursor-pointer overflow-hidden ${
+        className={`relative group rounded-3xl border-2 border-dashed transition-all duration-300 p-8 sm:p-12 text-center cursor-pointer overflow-hidden ${
           isDragOver
             ? 'border-indigo-500 bg-indigo-950/30 scale-[1.01] shadow-2xl shadow-indigo-500/20'
             : 'border-slate-800 hover:border-slate-700 bg-slate-900/40 hover:bg-slate-900/60'
@@ -122,8 +118,8 @@ export const FileDropzone: React.FC<FileDropzoneProps> = ({
         <div className="relative z-10 flex flex-col items-center justify-center space-y-4">
           
           {/* Animated Icon Circle */}
-          <div className="w-18 h-18 rounded-2xl bg-gradient-to-b from-slate-800 to-slate-900 border border-slate-700/60 shadow-xl flex items-center justify-center group-hover:scale-110 group-hover:border-indigo-500/50 transition-all duration-300">
-            <UploadCloud className="w-9 h-9 text-indigo-400 group-hover:text-indigo-300 transition-colors" />
+          <div className="w-20 h-20 rounded-2xl bg-gradient-to-b from-slate-800 to-slate-900 border border-slate-700/60 shadow-xl flex items-center justify-center group-hover:scale-110 group-hover:border-indigo-500/50 transition-all duration-300">
+            <UploadCloud className="w-10 h-10 text-indigo-400 group-hover:text-indigo-300 transition-colors" />
           </div>
 
           <div className="space-y-1.5 max-w-md">
@@ -140,7 +136,7 @@ export const FileDropzone: React.FC<FileDropzoneProps> = ({
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={isLoading}
-              className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs sm:text-sm font-semibold shadow-lg shadow-indigo-600/25 active:scale-95 transition-all cursor-pointer"
+              className="inline-flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs sm:text-sm font-semibold shadow-lg shadow-indigo-600/25 active:scale-95 transition-all cursor-pointer"
             >
               <FileText className="w-4 h-4" />
               <span>Select Font Files</span>
@@ -154,19 +150,10 @@ export const FileDropzone: React.FC<FileDropzoneProps> = ({
               <FolderPlus className="w-4 h-4 text-slate-400" />
               <span>Upload Folder</span>
             </button>
-
-            <button
-              onClick={onLoadDemoFonts}
-              disabled={isLoading}
-              className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-purple-600/20 to-pink-600/20 hover:from-purple-600/30 hover:to-pink-600/30 text-purple-200 text-xs sm:text-sm font-semibold border border-purple-500/30 active:scale-95 transition-all cursor-pointer shadow-sm"
-            >
-              <Sparkles className="w-4 h-4 text-pink-400" />
-              <span>Load Demo Fonts</span>
-            </button>
           </div>
 
           {/* Feature Highlights Badges */}
-          <div className="pt-5 flex flex-wrap items-center justify-center gap-6 text-xs text-slate-400 border-t border-slate-800/80 w-full max-w-2xl">
+          <div className="pt-6 flex flex-wrap items-center justify-center gap-6 text-xs text-slate-400 border-t border-slate-800/80 w-full max-w-2xl">
             <div className="flex items-center space-x-1.5">
               <Zap className="w-4 h-4 text-amber-400" />
               <span>WASM Google Brotli &amp; WOFF2</span>

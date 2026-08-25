@@ -7,3 +7,7 @@ dist-ssr
 .DS_Store
 Thumbs.db
 *.test.*
+*.woff2
+*.woff
+*.ttf
+*.otf

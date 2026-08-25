@@ -133,43 +133,6 @@ export default function App() {
     setIsLoading(false);
   };
 
-  // Load demo fonts
-  const handleLoadDemoFonts = async () => {
-    setIsLoading(true);
-    try {
-      const sampleNames = [
-        'Record Laser Black.woff2',
-        'Record Laser Bold.woff2',
-        'Record Laser Medium.woff2',
-        'Record Laser Italic.woff2',
-        'Record Disc Black.ttf',
-        'AT Montclear Bold.otf',
-        'Ft Buck.woff'
-      ];
-
-      const loadedFiles: File[] = [];
-      for (const name of sampleNames) {
-        const res = await fetch(`./samples/${encodeURIComponent(name)}`);
-        if (res.ok) {
-          const blob = await res.blob();
-          const file = new File([blob], name, { type: blob.type });
-          loadedFiles.push(file);
-        }
-      }
-
-      if (loadedFiles.length > 0) {
-        await handleFilesSelected(loadedFiles);
-      } else {
-        showToast('Demo fonts could not be fetched.', 'error');
-      }
-    } catch (err) {
-      console.error('Failed to load demo fonts:', err);
-      showToast('Failed to load demo fonts.', 'error');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   // Toggle font selection
   const handleToggleSelect = (id: string) => {
     setFonts(prev => prev.map(f => f.id === id ? { ...f, isSelected: !f.isSelected } : f));
@@ -501,7 +464,6 @@ export default function App() {
         {/* Dropzone */}
         <FileDropzone
           onFilesSelected={handleFilesSelected}
-          onLoadDemoFonts={handleLoadDemoFonts}
           isLoading={isLoading}
         />
 
