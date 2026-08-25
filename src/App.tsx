@@ -74,15 +74,15 @@ export default function App() {
 
         // Default target format: if WOFF/WOFF2 -> TTF; if TTF/OTF -> WOFF2
         let defaultTarget: FontFormat = 'ttf';
-        if (format === 'ttf' || format === 'otf') {
+        if (detectedFormat === 'ttf' || detectedFormat === 'otf') {
           defaultTarget = 'woff2';
         }
 
-        // Register font-face for live in-browser preview
+        // Register font-face using sfntBuffer for 100% reliable browser preview
         const fontFaceFamily = registerFontFace(
           metadata.family,
-          buffer,
-          detectedFormat
+          sfntBuffer,
+          format === 'otf' ? 'otf' : 'ttf'
         );
 
         const fontItem: FontItem = {
@@ -301,7 +301,7 @@ export default function App() {
           fullName: `${update.family} ${update.subfamily}`.trim()
         });
 
-        const newFontFace = registerFontFace(update.family, newSfnt, f.originalFormat);
+        const newFontFace = registerFontFace(update.family, newSfnt, f.originalFormat === 'otf' ? 'otf' : 'ttf');
 
         return {
           ...f,
@@ -363,7 +363,7 @@ export default function App() {
           manufacturer: updated.manufacturer
         });
 
-        const newFontFace = registerFontFace(updated.family, newSfnt, f.originalFormat);
+        const newFontFace = registerFontFace(updated.family, newSfnt, f.originalFormat === 'otf' ? 'otf' : 'ttf');
 
         return {
           ...f,

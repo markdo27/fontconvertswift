@@ -1,7 +1,7 @@
-import * as opentype from 'opentype.js';
+﻿import * as opentype from 'opentype.js';
 import type { Font as OpentypeFont } from 'opentype.js';
 import * as fflate from 'fflate';
-import wawoff2 from 'wawoff2';
+import { decompressWoff2, compressWoff2 } from './woff2Wasm';
 import { FontFormat } from '../types/font';
 
 export function sniffFontFormat(buffer: ArrayBuffer, fallbackFileName: string = ''): FontFormat {
@@ -24,10 +24,7 @@ export function sniffFontFormat(buffer: ArrayBuffer, fallbackFileName: string = 
 
 export async function decompressWoff2ToSfnt(buffer: ArrayBuffer): Promise<ArrayBuffer> {
   const uint8 = new Uint8Array(buffer);
-  const decompressed: Uint8Array = await wawoff2.decompress(uint8);
-  if (!decompressed || decompressed.length === 0) {
-    throw new Error('Failed to decompress WOFF2 font.');
-  }
+  const decompressed = await decompressWoff2(uint8);
   const sliced = decompressed.buffer.slice(
     decompressed.byteOffset,
     decompressed.byteOffset + decompressed.byteLength
@@ -37,10 +34,7 @@ export async function decompressWoff2ToSfnt(buffer: ArrayBuffer): Promise<ArrayB
 
 export async function compressSfntToWoff2(buffer: ArrayBuffer): Promise<ArrayBuffer> {
   const uint8 = new Uint8Array(buffer);
-  const compressed: Uint8Array = await wawoff2.compress(uint8);
-  if (!compressed || compressed.length === 0) {
-    throw new Error('Failed to compress font to WOFF2.');
-  }
+  const compressed = await compressWoff2(uint8);
   const sliced = compressed.buffer.slice(
     compressed.byteOffset,
     compressed.byteOffset + compressed.byteLength
