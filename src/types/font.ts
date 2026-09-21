@@ -1,51 +1,74 @@
 import type { Font as OpentypeFont } from 'opentype.js';
+import type { OutlineFlavor } from '../lib/sfnt';
 
 export type FontFormat = 'woff2' | 'woff' | 'ttf' | 'otf';
+
+export const FONT_FORMATS: FontFormat[] = ['woff2', 'woff', 'ttf', 'otf'];
+
+/** The name-table fields the editor exposes, beyond family and style. */
+export interface FontNameFields {
+  fullName: string;
+  postScriptName: string;
+  uniqueId: string;
+  version: string;
+  copyright: string;
+  trademark: string;
+  designer: string;
+  manufacturer: string;
+  description: string;
+  designerURL: string;
+  vendorURL: string;
+  license: string;
+  licenseURL: string;
+}
 
 export interface FontItem {
   id: string;
   originalFileName: string;
   fileName: string;
+
+  /** The container the file arrived in. */
   originalFormat: FontFormat;
   targetFormat: FontFormat;
+  /** Whether the glyphs are TrueType (`glyf`) or PostScript (`CFF `) outlines. */
+  outlineFlavor: OutlineFlavor;
+
   originalSize: number;
   convertedSize: number | null;
-  
-  // Font OpenType Names
+
+  // OpenType names
   family: string;
-  subfamily: string; // Style: Regular, Bold, Italic, Medium, etc.
-  fullName: string;
-  postScriptName: string;
-  uniqueId: string;
-  version: string;
-  typographicFamily?: string;
-  typographicSubfamily?: string;
-  
-  // Metrics & Weights
-  weight: number; // 100 to 900
+  subfamily: string;
+  names: FontNameFields;
+
+  // Metrics and weights
+  weight: number;
   isItalic: boolean;
   isBold: boolean;
   unitsPerEm: number;
   ascender: number;
   descender: number;
   numGlyphs: number;
-  
-  // Additional info
-  copyright?: string;
-  designer?: string;
-  manufacturer?: string;
-  
-  // Buffers & Runtime
-  originalBuffer: ArrayBuffer;
+  tableTags: string[];
+
+  /**
+   * The decompressed sfnt for the font as it currently stands, including any
+   * metadata edits. Every conversion and download is built from this.
+   */
+  sfntBuffer: ArrayBuffer;
+  /** The sfnt exactly as loaded, so edits can always be reverted. */
+  originalSfntBuffer: ArrayBuffer;
   convertedBuffer: ArrayBuffer | null;
+
+  /** Parsed form, used only for glyph inspection and previews. */
   parsedFont: OpentypeFont | null;
-  fontFaceUrl: string | null;
   fontFaceFamily: string | null;
-  
-  // UI & Processing status
+
   status: 'idle' | 'converting' | 'success' | 'error';
   errorMessage?: string;
-  isSelected?: boolean;
+  isSelected: boolean;
+  /** True once the metadata has been edited away from the loaded file. */
+  isEdited: boolean;
 }
 
 export interface GlyphDetail {
@@ -62,23 +85,17 @@ export interface GlyphDetail {
   yMin?: number;
   yMax?: number;
   pathSvg: string;
-  pathCmds: any[];
 }
 
-export type CasingOption = 'none' | 'kebab' | 'snake' | 'camel' | 'pascal' | 'title' | 'lower' | 'upper';
-
-export interface BatchRenameConfig {
-  unifiedFamily: string;
-  updateFamily: boolean;
-  findText: string;
-  replaceText: string;
-  useRegex: boolean;
-  fileTemplate: string;
-  casing: CasingOption;
-  autoDetectWeights: boolean;
-  autoGeneratePostScript: boolean;
-  syncTypographicNames: boolean;
-}
+export type CasingOption =
+  | 'none'
+  | 'kebab'
+  | 'snake'
+  | 'camel'
+  | 'pascal'
+  | 'title'
+  | 'lower'
+  | 'upper';
 
 export interface WeightOption {
   value: number;
@@ -98,3 +115,17 @@ export const STANDARD_WEIGHTS: WeightOption[] = [
   { value: 900, label: '900 - Black / Heavy', keyword: 'Black' },
   { value: 950, label: '950 - Extra Black / Ultra', keyword: 'Ultra' }
 ];
+
+/** The desktop container that matches a font's outline flavour. */
+export function nativeDesktopFormat(flavor: OutlineFlavor): FontFormat {
+  return flavor === 'cff' ? 'otf' : 'ttf';
+}
+
+/**
+ * True when the chosen container misrepresents the outlines inside, e.g. a
+ * CFF font handed out as `.ttf`. The file still works, but the extension lies.
+ */
+export function isMislabelledContainer(flavor: OutlineFlavor, target: FontFormat): boolean {
+  if (target !== 'ttf' && target !== 'otf') return false;
+  return target !== nativeDesktopFormat(flavor);
+}

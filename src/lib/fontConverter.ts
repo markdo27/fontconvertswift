@@ -1,20 +1,20 @@
-﻿import * as opentype from 'opentype.js';
+import * as opentype from 'opentype.js';
 import type { Font as OpentypeFont } from 'opentype.js';
 import * as fflate from 'fflate';
-import { decompressWoff2, compressWoff2 } from './woff2Wasm';
-import { FontFormat } from '../types/font';
+import { compressWoff2, decompressWoff2 } from './woff2Wasm';
+import { outlineFlavorOf, parseSfnt, type OutlineFlavor } from './sfnt';
+import type { FontFormat } from '../types/font';
 
-export function sniffFontFormat(buffer: ArrayBuffer, fallbackFileName: string = ''): FontFormat {
+export function sniffFontFormat(buffer: ArrayBuffer, fallbackFileName = ''): FontFormat {
   if (buffer.byteLength >= 4) {
-    const view = new DataView(buffer);
-    const magic = view.getUint32(0);
-    
-    if (magic === 0x774F4632) return 'woff2'; // "wOF2"
-    if (magic === 0x774F4646) return 'woff';  // "wOFF"
-    if (magic === 0x4F54544F) return 'otf';   // "OTTO" (CFF / OpenType)
-    if (magic === 0x00010000 || magic === 0x74727565) return 'ttf'; // 0x00010000 or "true"
+    const magic = new DataView(buffer).getUint32(0);
+
+    if (magic === 0x774f4632) return 'woff2'; // "wOF2"
+    if (magic === 0x774f4646) return 'woff'; // "wOFF"
+    if (magic === 0x4f54544f) return 'otf'; // "OTTO" - CFF outlines
+    if (magic === 0x00010000 || magic === 0x74727565) return 'ttf';
   }
-  
+
   const ext = fallbackFileName.toLowerCase().split('.').pop();
   if (ext === 'woff2') return 'woff2';
   if (ext === 'woff') return 'woff';
@@ -23,29 +23,24 @@ export function sniffFontFormat(buffer: ArrayBuffer, fallbackFileName: string = 
 }
 
 export async function decompressWoff2ToSfnt(buffer: ArrayBuffer): Promise<ArrayBuffer> {
-  const uint8 = new Uint8Array(buffer);
-  const decompressed = await decompressWoff2(uint8);
-  const sliced = decompressed.buffer.slice(
+  const decompressed = await decompressWoff2(new Uint8Array(buffer));
+  return decompressed.buffer.slice(
     decompressed.byteOffset,
     decompressed.byteOffset + decompressed.byteLength
-  );
-  return sliced as ArrayBuffer;
+  ) as ArrayBuffer;
 }
 
 export async function compressSfntToWoff2(buffer: ArrayBuffer): Promise<ArrayBuffer> {
-  const uint8 = new Uint8Array(buffer);
-  const compressed = await compressWoff2(uint8);
-  const sliced = compressed.buffer.slice(
+  const compressed = await compressWoff2(new Uint8Array(buffer));
+  return compressed.buffer.slice(
     compressed.byteOffset,
     compressed.byteOffset + compressed.byteLength
-  );
-  return sliced as ArrayBuffer;
+  ) as ArrayBuffer;
 }
 
 export function decompressWoff1ToSfnt(buffer: ArrayBuffer): ArrayBuffer {
   const view = new DataView(buffer);
-  const magic = view.getUint32(0);
-  if (magic !== 0x774F4646) {
+  if (view.getUint32(0) !== 0x774f4646) {
     throw new Error('Not a valid WOFF 1.0 file.');
   }
 
@@ -78,20 +73,18 @@ export function decompressWoff1ToSfnt(buffer: ArrayBuffer): ArrayBuffer {
     tables.push({ tag, checksum, origLength, data: rawData });
   }
 
-  // Calculate table offsets
   const headerSize = 12 + numTables * 16;
   let curOffset = (headerSize + 3) & ~3;
   const sfntRecords: Array<TableRec & { offset: number }> = [];
 
-  for (const t of tables) {
-    sfntRecords.push({ ...t, offset: curOffset });
-    curOffset += (t.origLength + 3) & ~3;
+  for (const table of tables) {
+    sfntRecords.push({ ...table, offset: curOffset });
+    curOffset += (table.origLength + 3) & ~3;
   }
 
   const outBuf = new Uint8Array(curOffset);
   const outView = new DataView(outBuf.buffer);
 
-  // SFNT Header
   outView.setUint32(0, flavor);
   outView.setUint16(4, numTables);
   const entrySelector = Math.floor(Math.log2(numTables));
@@ -100,16 +93,15 @@ export function decompressWoff1ToSfnt(buffer: ArrayBuffer): ArrayBuffer {
   outView.setUint16(8, entrySelector);
   outView.setUint16(10, numTables * 16 - searchRange);
 
-  // SFNT Table Directory
-  sfntRecords.forEach((t, i) => {
+  sfntRecords.forEach((table, i) => {
     const recOffset = 12 + i * 16;
     for (let c = 0; c < 4; c++) {
-      outView.setUint8(recOffset + c, t.tag.charCodeAt(c));
+      outView.setUint8(recOffset + c, table.tag.charCodeAt(c));
     }
-    outView.setUint32(recOffset + 4, t.checksum);
-    outView.setUint32(recOffset + 8, t.offset);
-    outView.setUint32(recOffset + 12, t.origLength);
-    outBuf.set(t.data, t.offset);
+    outView.setUint32(recOffset + 4, table.checksum);
+    outView.setUint32(recOffset + 8, table.offset);
+    outView.setUint32(recOffset + 12, table.origLength);
+    outBuf.set(table.data, table.offset);
   });
 
   return outBuf.buffer as ArrayBuffer;
@@ -166,121 +158,157 @@ export function compressSfntToWoff1(buffer: ArrayBuffer): ArrayBuffer {
   const woffBuf = new Uint8Array(curWoffOffset);
   const wView = new DataView(woffBuf.buffer);
 
-  // WOFF Header
-  wView.setUint32(0, 0x774F4646); // "wOFF"
+  wView.setUint32(0, 0x774f4646); // "wOFF"
   wView.setUint32(4, flavor);
   wView.setUint32(8, curWoffOffset);
   wView.setUint16(12, numTables);
   wView.setUint16(14, 0);
   wView.setUint32(16, totalSfntSize);
-  wView.setUint16(20, 1); // majorVersion
-  wView.setUint16(22, 0); // minorVersion
-  wView.setUint32(24, 0); // metaOffset
-  wView.setUint32(28, 0); // metaLength
-  wView.setUint32(32, 0); // metaOrigLength
-  wView.setUint32(36, 0); // privOffset
-  wView.setUint32(40, 0); // privLength
+  wView.setUint16(20, 1);
+  wView.setUint16(22, 0);
+  wView.setUint32(24, 0);
+  wView.setUint32(28, 0);
+  wView.setUint32(32, 0);
+  wView.setUint32(36, 0);
+  wView.setUint32(40, 0);
 
-  tables.forEach((t, i) => {
+  tables.forEach((table, i) => {
     const dOffset = 44 + i * 20;
     for (let c = 0; c < 4; c++) {
-      wView.setUint8(dOffset + c, t.tag.charCodeAt(c));
+      wView.setUint8(dOffset + c, table.tag.charCodeAt(c));
     }
-    wView.setUint32(dOffset + 4, t.offset);
-    wView.setUint32(dOffset + 8, t.compLength);
-    wView.setUint32(dOffset + 12, t.origLength);
-    wView.setUint32(dOffset + 16, t.checksum);
-    woffBuf.set(t.data, t.offset);
+    wView.setUint32(dOffset + 4, table.offset);
+    wView.setUint32(dOffset + 8, table.compLength);
+    wView.setUint32(dOffset + 12, table.origLength);
+    wView.setUint32(dOffset + 16, table.checksum);
+    woffBuf.set(table.data, table.offset);
   });
 
   return woffBuf.buffer as ArrayBuffer;
 }
 
-export async function convertToSfntBuffer(
-  buffer: ArrayBuffer,
-  format: FontFormat
-): Promise<ArrayBuffer> {
-  if (format === 'woff2') {
-    return await decompressWoff2ToSfnt(buffer);
-  } else if (format === 'woff') {
-    return decompressWoff1ToSfnt(buffer);
-  }
+/** Unwraps any supported container down to a raw sfnt. */
+export async function toSfnt(buffer: ArrayBuffer, format: FontFormat): Promise<ArrayBuffer> {
+  if (format === 'woff2') return decompressWoff2ToSfnt(buffer);
+  if (format === 'woff') return decompressWoff1ToSfnt(buffer);
   return buffer;
 }
 
-export async function parseFont(
-  buffer: ArrayBuffer,
-  fallbackFileName: string = ''
-): Promise<{ font: OpentypeFont; sfntBuffer: ArrayBuffer; format: FontFormat }> {
-  const format = sniffFontFormat(buffer, fallbackFileName);
-  const sfntBuffer = await convertToSfntBuffer(buffer, format);
-  
-  const font = opentype.parse(sfntBuffer);
-  return { font, sfntBuffer, format };
+export interface LoadedFont {
+  sfntBuffer: ArrayBuffer;
+  format: FontFormat;
+  outlineFlavor: OutlineFlavor;
+  tableTags: string[];
+  font: OpentypeFont | null;
+  parseError?: string;
 }
 
-export async function convertFontBuffer(
-  inputBuffer: ArrayBuffer,
-  fromFormat: FontFormat,
-  toFormat: FontFormat,
-  loadedFont?: OpentypeFont
-): Promise<ArrayBuffer> {
-  // Step 1: Ensure we have an SFNT (TTF/OTF) buffer
-  let sfntBuffer: ArrayBuffer;
-  if (loadedFont) {
-    sfntBuffer = loadedFont.toArrayBuffer();
-  } else {
-    sfntBuffer = await convertToSfntBuffer(inputBuffer, fromFormat);
+/**
+ * Unwraps a font file to its sfnt and reads its table directory.
+ *
+ * opentype.js is used only to parse glyph outlines for the character map and
+ * specimen views. If it cannot parse the font, loading still succeeds: the
+ * table directory and the metadata editor do not depend on it.
+ */
+export async function loadFont(buffer: ArrayBuffer, fileName = ''): Promise<LoadedFont> {
+  const format = sniffFontFormat(buffer, fileName);
+  const sfntBuffer = await toSfnt(buffer, format);
+  const sfnt = parseSfnt(sfntBuffer);
+
+  let font: OpentypeFont | null = null;
+  let parseError: string | undefined;
+  try {
+    font = opentype.parse(sfntBuffer);
+  } catch (err) {
+    parseError = err instanceof Error ? err.message : String(err);
   }
 
-  // Step 2: Convert SFNT to target format
-  if (toFormat === 'woff2') {
-    return await compressSfntToWoff2(sfntBuffer);
-  } else if (toFormat === 'woff') {
-    return compressSfntToWoff1(sfntBuffer);
-  } else if (toFormat === 'ttf' || toFormat === 'otf') {
-    return sfntBuffer;
-  }
+  return {
+    sfntBuffer,
+    format,
+    outlineFlavor: outlineFlavorOf(sfnt),
+    tableTags: sfnt.tables.map((t) => t.tag).sort(),
+    font,
+    parseError
+  };
+}
 
+/**
+ * Packs an sfnt into the requested container.
+ *
+ * This is a repackaging step, not a rebuild: `ttf` and `otf` hand back the sfnt
+ * itself and `woff`/`woff2` wrap it, so outlines, hinting and layout tables are
+ * carried through untouched. Nothing is regenerated from parsed glyphs.
+ */
+export async function packSfnt(sfntBuffer: ArrayBuffer, target: FontFormat): Promise<ArrayBuffer> {
+  if (target === 'woff2') return compressSfntToWoff2(sfntBuffer);
+  if (target === 'woff') return compressSfntToWoff1(sfntBuffer);
   return sfntBuffer;
 }
 
+export function mimeTypeFor(format: FontFormat): string {
+  switch (format) {
+    case 'woff2':
+      return 'font/woff2';
+    case 'woff':
+      return 'font/woff';
+    case 'otf':
+      return 'font/otf';
+    default:
+      return 'font/ttf';
+  }
+}
+
+export function cssFormatFor(format: FontFormat): string {
+  switch (format) {
+    case 'woff2':
+      return "format('woff2')";
+    case 'woff':
+      return "format('woff')";
+    case 'otf':
+      return "format('opentype')";
+    default:
+      return "format('truetype')";
+  }
+}
+
+const registeredFaces = new Map<string, { styleEl: HTMLStyleElement; url: string }>();
+
+/**
+ * Installs an sfnt as a usable `@font-face` and returns its generated family
+ * name. Re-registering under the same key revokes the previous blob URL, so
+ * repeated metadata edits do not leak object URLs.
+ */
 export function registerFontFace(
-  fontFamilyName: string,
-  buffer: ArrayBuffer,
-  format: FontFormat
+  key: string,
+  familyName: string,
+  sfntBuffer: ArrayBuffer,
+  flavor: OutlineFlavor
 ): string {
-  const mimeType =
-    format === 'woff2'
-      ? 'font/woff2'
-      : format === 'woff'
-      ? 'font/woff'
-      : format === 'otf'
-      ? 'font/otf'
-      : 'font/ttf';
+  const previous = registeredFaces.get(key);
+  if (previous) {
+    URL.revokeObjectURL(previous.url);
+    previous.styleEl.remove();
+  }
 
-  const blob = new Blob([buffer], { type: mimeType });
-  const fontUrl = URL.createObjectURL(blob);
-  const safeName = `CustomFont_${fontFamilyName.replace(/[^\w]/g, '_')}_${Math.random().toString(36).substring(2, 9)}`;
+  const mimeType = flavor === 'cff' ? 'font/otf' : 'font/ttf';
+  const formatStr = flavor === 'cff' ? "format('opentype')" : "format('truetype')";
 
-  const formatStr =
-    format === 'woff2'
-      ? "format('woff2')"
-      : format === 'woff'
-      ? "format('woff')"
-      : format === 'otf'
-      ? "format('opentype')"
-      : "format('truetype')";
+  const url = URL.createObjectURL(new Blob([sfntBuffer], { type: mimeType }));
+  const safeName = `TF_${familyName.replace(/[^\w]/g, '_').slice(0, 40)}_${key.replace(/[^\w]/g, '')}`;
 
-  const style = document.createElement('style');
-  style.textContent = `
-    @font-face {
-      font-family: '${safeName}';
-      src: url('${fontUrl}') ${formatStr};
-      font-display: swap;
-    }
-  `;
-  document.head.appendChild(style);
+  const styleEl = document.createElement('style');
+  styleEl.textContent = `@font-face{font-family:'${safeName}';src:url('${url}') ${formatStr};font-display:block}`;
+  document.head.appendChild(styleEl);
 
+  registeredFaces.set(key, { styleEl, url });
   return safeName;
+}
+
+export function releaseFontFace(key: string): void {
+  const entry = registeredFaces.get(key);
+  if (!entry) return;
+  URL.revokeObjectURL(entry.url);
+  entry.styleEl.remove();
+  registeredFaces.delete(key);
 }

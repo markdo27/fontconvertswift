@@ -1,522 +1,822 @@
-﻿import React, { useState } from 'react';
-import { 
-  Type, 
-  Sparkles, 
-  Layers, 
-  Download, 
-  RefreshCw, 
-  FileCode, 
-  Trash2, 
-  AlertCircle,
-  CheckCircle2
-} from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import JSZip from 'jszip';
 import saveAs from 'file-saver';
 
-import { FontFormat, FontItem } from './types/font';
-import { 
-  parseFont, 
-  convertFontBuffer, 
-  registerFontFace, 
-  sniffFontFormat 
-} from './lib/fontConverter';
-import { 
-  extractMetadataFromParsedFont, 
-  updateFontMetadata, 
-  formatFileName, 
-  sanitizePostScriptName 
-} from './lib/fontMetadata';
-
-import { Header } from './components/Header';
-import { FileDropzone } from './components/FileDropzone';
-import { FontListTable } from './components/FontListTable';
-import { BatchRenameModal } from './components/BatchRenameModal';
+import { Icon } from './ui/Icon';
+import { Bar, Check, Modal, Notice } from './ui/primitives';
+import { Masthead } from './components/Masthead';
+import { AuthorSection, Foot } from './components/AuthorSection';
+import { FileDropzone, isFontFile } from './components/FileDropzone';
+import { FontCard } from './components/FontCard';
+import { MetadataModal, type MetadataDraft } from './components/MetadataModal';
+import { BatchRenameModal, type BatchRenameResult } from './components/BatchRenameModal';
 import { CharacterMapModal } from './components/CharacterMapModal';
-import { TextPlaygroundModal } from './components/TextPlaygroundModal';
-import { SingleFontEditModal } from './components/SingleFontEditModal';
-import { CssExportModal } from './components/CssExportModal';
+import { SpecimenModal } from './components/SpecimenModal';
+import { CssExportModal, buildFontFaceCss } from './components/CssExportModal';
+
+import {
+  loadFont,
+  mimeTypeFor,
+  packSfnt,
+  registerFontFace,
+  releaseFontFace
+} from './lib/fontConverter';
+import { readMetadataFromSfnt, writeMetadataToSfnt } from './lib/fontMetadata';
+import { parseSfnt, readUnitsPerEm, getTable } from './lib/sfnt';
+import { replaceExtension, uniqueFileName } from './lib/format';
+import {
+  FONT_FORMATS,
+  nativeDesktopFormat,
+  type FontFormat,
+  type FontItem
+} from './types/font';
+
+type Toast = { id: number; message: string; kind: 'info' | 'success' | 'error' };
+type SortKey = 'added' | 'family' | 'weight' | 'size';
+
+let toastSeq = 0;
 
 export default function App() {
   const [fonts, setFonts] = useState<FontItem[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [isConverting, setIsConverting] = useState<boolean>(false);
-  const [progress, setProgress] = useState<{ current: number; total: number; name: string } | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isBusy, setIsBusy] = useState(false);
+  const [progress, setProgress] = useState<{ current: number; total: number; name: string } | null>(
+    null
+  );
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [isDragOver, setIsDragOver] = useState(false);
 
-  // Modals state
-  const [isBatchRenameOpen, setIsBatchRenameOpen] = useState<boolean>(false);
-  const [characterMapFont, setCharacterMapFont] = useState<FontItem | null>(null);
-  const [playgroundFont, setPlaygroundFont] = useState<FontItem | null>(null);
-  const [editSingleFont, setEditSingleFont] = useState<FontItem | null>(null);
-  const [isCssExportOpen, setIsCssExportOpen] = useState<boolean>(false);
+  // Library view
+  const [query, setQuery] = useState('');
+  const [formatFilter, setFormatFilter] = useState<'all' | FontFormat>('all');
+  const [sortKey, setSortKey] = useState<SortKey>('added');
+  const [compact, setCompact] = useState(false);
+  const [sampleText, setSampleText] = useState('Sphinx of black quartz');
 
-  // Toast / notification
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  // Modals — each is mounted only while open so its hooks start clean.
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [cssOpen, setCssOpen] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [charMapId, setCharMapId] = useState<string | null>(null);
+  const [specimenId, setSpecimenId] = useState<string | null>(null);
 
-  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), 3500);
-  };
+  const notify = useCallback((message: string, kind: Toast['kind'] = 'info') => {
+    const id = ++toastSeq;
+    setToasts((prev) => [...prev.slice(-3), { id, message, kind }]);
+    window.setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4200);
+  }, []);
 
-  // Process incoming files
-  const handleFilesSelected = async (files: File[]) => {
-    setIsLoading(true);
-    let successCount = 0;
-    const newFontItems: FontItem[] = [];
+  /* ---------------- loading ---------------- */
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      try {
-        const buffer = await file.arrayBuffer();
-        const detectedFormat = sniffFontFormat(buffer, file.name);
+  const handleFilesSelected = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0) return;
+      setIsLoading(true);
 
-        const { font, sfntBuffer, format } = await parseFont(buffer, file.name);
-        const metadata = extractMetadataFromParsedFont(font, file.name);
+      const loaded: FontItem[] = [];
+      const failures: string[] = [];
 
-        // Default target format: if WOFF/WOFF2 -> TTF; if TTF/OTF -> WOFF2
-        let defaultTarget: FontFormat = 'ttf';
-        if (detectedFormat === 'ttf' || detectedFormat === 'otf') {
-          defaultTarget = 'woff2';
-        }
+      for (const file of files) {
+        try {
+          const buffer = await file.arrayBuffer();
+          const result = await loadFont(buffer, file.name);
+          const metadata = readMetadataFromSfnt(result.sfntBuffer, file.name);
 
-        // Register font-face using sfntBuffer for 100% reliable browser preview
-        const fontFaceFamily = registerFontFace(
-          metadata.family,
-          sfntBuffer,
-          format === 'otf' ? 'otf' : 'ttf'
-        );
+          const sfnt = parseSfnt(result.sfntBuffer);
+          const unitsPerEm = readUnitsPerEm(getTable(sfnt, 'head')) || 1000;
 
-        const fontItem: FontItem = {
-          id: `font_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
-          originalFileName: file.name,
-          fileName: file.name,
-          originalFormat: detectedFormat,
-          targetFormat: defaultTarget,
-          originalSize: file.size,
-          convertedSize: null,
-          family: metadata.family,
-          subfamily: metadata.subfamily,
-          fullName: metadata.fullName,
-          postScriptName: metadata.postScriptName,
-          uniqueId: metadata.uniqueId,
-          version: metadata.version,
-          weight: metadata.weight,
-          isItalic: metadata.isItalic,
-          isBold: metadata.isBold,
-          unitsPerEm: metadata.unitsPerEm,
-          ascender: metadata.ascender,
-          descender: metadata.descender,
-          numGlyphs: metadata.numGlyphs,
-          copyright: metadata.copyright,
-          designer: metadata.designer,
-          manufacturer: metadata.manufacturer,
-          originalBuffer: buffer,
-          convertedBuffer: null,
-          parsedFont: font,
-          fontFaceUrl: null,
-          fontFaceFamily,
-          status: 'idle',
-          isSelected: true
-        };
+          const id = `f${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+          const targetFormat: FontFormat =
+            result.format === 'ttf' || result.format === 'otf'
+              ? 'woff2'
+              : nativeDesktopFormat(result.outlineFlavor);
 
-        newFontItems.push(fontItem);
-        successCount++;
-      } catch (err: any) {
-        console.error(`Error parsing font ${file.name}:`, err);
-        showToast(`Failed to parse ${file.name}: ${err.message || 'Corrupted or unsupported format'}`, 'error');
-      }
-    }
-
-    if (newFontItems.length > 0) {
-      setFonts(prev => [...prev, ...newFontItems]);
-      showToast(`Loaded ${newFontItems.length} font${newFontItems.length > 1 ? 's' : ''} successfully!`, 'success');
-    }
-    setIsLoading(false);
-  };
-
-  // Toggle font selection
-  const handleToggleSelect = (id: string) => {
-    setFonts(prev => prev.map(f => f.id === id ? { ...f, isSelected: !f.isSelected } : f));
-  };
-
-  // Select all / deselect all
-  const handleSelectAll = (select: boolean) => {
-    setFonts(prev => prev.map(f => ({ ...f, isSelected: select })));
-  };
-
-  // Change individual target format
-  const handleChangeTargetFormat = (id: string, format: FontFormat) => {
-    setFonts(prev => prev.map(f => {
-      if (f.id !== id) return f;
-      const baseName = f.fileName.replace(/\.[^.]+$/, '');
-      return {
-        ...f,
-        targetFormat: format,
-        fileName: `${baseName}.${format}`,
-        convertedBuffer: null,
-        convertedSize: null
-      };
-    }));
-  };
-
-  // Delete font
-  const handleDeleteFont = (id: string) => {
-    setFonts(prev => prev.filter(f => f.id !== id));
-  };
-
-  // Convert Single Font
-  const handleConvertSingle = async (font: FontItem) => {
-    setFonts(prev => prev.map(f => f.id === font.id ? { ...f, status: 'converting' } : f));
-    try {
-      const outBuffer = await convertFontBuffer(
-        font.originalBuffer,
-        font.originalFormat,
-        font.targetFormat,
-        font.parsedFont || undefined
-      );
-
-      const baseName = font.fileName.replace(/\.[^.]+$/, '');
-      const outName = `${baseName}.${font.targetFormat}`;
-
-      setFonts(prev => prev.map(f => f.id === font.id ? {
-        ...f,
-        status: 'success',
-        convertedBuffer: outBuffer,
-        convertedSize: outBuffer.byteLength,
-        fileName: outName
-      } : f));
-
-      // Trigger instant single download
-      const mimeType = 
-        font.targetFormat === 'woff2' ? 'font/woff2' :
-        font.targetFormat === 'woff' ? 'font/woff' :
-        font.targetFormat === 'otf' ? 'font/otf' : 'font/ttf';
-
-      const blob = new Blob([outBuffer], { type: mimeType });
-      saveAs(blob, outName);
-      showToast(`Converted & downloaded ${outName}!`, 'success');
-    } catch (err: any) {
-      console.error('Conversion failed:', err);
-      setFonts(prev => prev.map(f => f.id === font.id ? { ...f, status: 'error', errorMessage: err.message } : f));
-      showToast(`Failed to convert ${font.fileName}: ${err.message}`, 'error');
-    }
-  };
-
-  // Convert All Selected or All Fonts to a specific format
-  const handleConvertAll = async (targetFormat: FontFormat) => {
-    const selected = fonts.filter(f => f.isSelected);
-    const targetList = selected.length > 0 ? selected : fonts;
-    if (targetList.length === 0) return;
-
-    setIsConverting(true);
-    let convertedCount = 0;
-
-    for (let i = 0; i < targetList.length; i++) {
-      const f = targetList[i];
-      setProgress({ current: i + 1, total: targetList.length, name: f.fileName });
-
-      try {
-        const outBuffer = await convertFontBuffer(
-          f.originalBuffer,
-          f.originalFormat,
-          targetFormat,
-          f.parsedFont || undefined
-        );
-
-        const baseName = f.fileName.replace(/\.[^.]+$/, '');
-        const outName = `${baseName}.${targetFormat}`;
-
-        setFonts(prev => prev.map(item => item.id === f.id ? {
-          ...item,
-          targetFormat,
-          fileName: outName,
-          convertedBuffer: outBuffer,
-          convertedSize: outBuffer.byteLength,
-          status: 'success'
-        } : item));
-
-        convertedCount++;
-      } catch (err: any) {
-        console.error(`Error converting ${f.fileName}:`, err);
-        setFonts(prev => prev.map(item => item.id === f.id ? { ...item, status: 'error' } : item));
-      }
-    }
-
-    setIsConverting(false);
-    setProgress(null);
-    showToast(`Successfully converted ${convertedCount} fonts to .${targetFormat}!`, 'success');
-  };
-
-  // Apply Batch Rename & Weight Normalization
-  const handleApplyBatchRename = (
-    updatedItems: Array<{ id: string; family: string; subfamily: string; weight: number; isItalic: boolean; fileName: string; postScriptName: string }>
-  ) => {
-    setFonts(prev => prev.map(f => {
-      const update = updatedItems.find(u => u.id === f.id);
-      if (!update || !f.parsedFont) return f;
-
-      try {
-        const newSfnt = updateFontMetadata(f.parsedFont, {
-          family: update.family,
-          subfamily: update.subfamily,
-          weight: update.weight,
-          isItalic: update.isItalic,
-          postScriptName: update.postScriptName,
-          fullName: `${update.family} ${update.subfamily}`.trim()
-        });
-
-        const newFontFace = registerFontFace(update.family, newSfnt, f.originalFormat === 'otf' ? 'otf' : 'ttf');
-
-        return {
-          ...f,
-          family: update.family,
-          subfamily: update.subfamily,
-          weight: update.weight,
-          isItalic: update.isItalic,
-          isBold: update.weight >= 700,
-          fullName: `${update.family} ${update.subfamily}`.trim(),
-          postScriptName: update.postScriptName,
-          fileName: update.fileName,
-          originalBuffer: newSfnt,
-          fontFaceFamily: newFontFace,
-          convertedBuffer: null,
-          convertedSize: null
-        };
-      } catch (err) {
-        console.error(`Failed to update metadata for ${f.fileName}:`, err);
-        return f;
-      }
-    }));
-
-    showToast(`Updated metadata for ${updatedItems.length} fonts!`, 'success');
-  };
-
-  // Save Single Font Edit
-  const handleSaveSingleFont = (updated: {
-    id: string;
-    family: string;
-    subfamily: string;
-    fullName: string;
-    postScriptName: string;
-    uniqueId: string;
-    version: string;
-    weight: number;
-    isItalic: boolean;
-    isBold: boolean;
-    fileName: string;
-    copyright?: string;
-    designer?: string;
-    manufacturer?: string;
-  }) => {
-    setFonts(prev => prev.map(f => {
-      if (f.id !== updated.id || !f.parsedFont) return f;
-
-      try {
-        const newSfnt = updateFontMetadata(f.parsedFont, {
-          family: updated.family,
-          subfamily: updated.subfamily,
-          fullName: updated.fullName,
-          postScriptName: updated.postScriptName,
-          uniqueId: updated.uniqueId,
-          version: updated.version,
-          weight: updated.weight,
-          isItalic: updated.isItalic,
-          isBold: updated.isBold,
-          copyright: updated.copyright,
-          designer: updated.designer,
-          manufacturer: updated.manufacturer
-        });
-
-        const newFontFace = registerFontFace(updated.family, newSfnt, f.originalFormat === 'otf' ? 'otf' : 'ttf');
-
-        return {
-          ...f,
-          ...updated,
-          originalBuffer: newSfnt,
-          fontFaceFamily: newFontFace,
-          convertedBuffer: null,
-          convertedSize: null
-        };
-      } catch (err) {
-        console.error('Error saving single font metadata:', err);
-        return f;
-      }
-    }));
-
-    showToast(`Saved metadata for ${updated.family} ${updated.subfamily}!`, 'success');
-  };
-
-  // Download All as ZIP
-  const handleDownloadAllZip = async () => {
-    const selected = fonts.filter(f => f.isSelected);
-    const targetList = selected.length > 0 ? selected : fonts;
-    if (targetList.length === 0) return;
-
-    setIsConverting(true);
-    const zip = new JSZip();
-
-    for (let i = 0; i < targetList.length; i++) {
-      const f = targetList[i];
-      setProgress({ current: i + 1, total: targetList.length, name: f.fileName });
-
-      try {
-        let bufferToZip = f.convertedBuffer;
-        if (!bufferToZip) {
-          bufferToZip = await convertFontBuffer(
-            f.originalBuffer,
-            f.originalFormat,
-            f.targetFormat,
-            f.parsedFont || undefined
+          const fontFaceFamily = registerFontFace(
+            id,
+            metadata.family,
+            result.sfntBuffer,
+            result.outlineFlavor
           );
+
+          loaded.push({
+            id,
+            originalFileName: file.name,
+            fileName: replaceExtension(file.name, targetFormat),
+            originalFormat: result.format,
+            targetFormat,
+            outlineFlavor: result.outlineFlavor,
+            originalSize: file.size,
+            convertedSize: null,
+            family: metadata.family,
+            subfamily: metadata.subfamily,
+            names: metadata.names,
+            weight: metadata.weight,
+            isItalic: metadata.isItalic,
+            isBold: metadata.isBold,
+            unitsPerEm,
+            ascender: result.font?.ascender ?? 0,
+            descender: result.font?.descender ?? 0,
+            numGlyphs: result.font?.glyphs?.length ?? 0,
+            tableTags: result.tableTags,
+            sfntBuffer: result.sfntBuffer,
+            originalSfntBuffer: result.sfntBuffer,
+            convertedBuffer: null,
+            parsedFont: result.font,
+            fontFaceFamily,
+            status: 'idle',
+            isSelected: true,
+            isEdited: false
+          });
+        } catch (err) {
+          failures.push(`${file.name}: ${err instanceof Error ? err.message : 'unreadable'}`);
         }
+      }
 
-        const ext = f.targetFormat;
-        const base = f.fileName.replace(/\.[^.]+$/, '');
-        const filenameInZip = `${base}.${ext}`;
+      if (loaded.length > 0) {
+        setFonts((prev) => [...prev, ...loaded]);
+        notify(`Loaded ${loaded.length} font${loaded.length > 1 ? 's' : ''}`, 'success');
+      }
+      for (const failure of failures) notify(failure, 'error');
 
-        zip.file(filenameInZip, bufferToZip);
-      } catch (err: any) {
-        console.error(`Error archiving ${f.fileName}:`, err);
+      setIsLoading(false);
+    },
+    [notify]
+  );
+
+  /* ---------------- window-wide drag and drop ---------------- */
+
+  const dragDepth = useRef(0);
+
+  useEffect(() => {
+    const onDragEnter = (event: DragEvent) => {
+      if (!event.dataTransfer?.types.includes('Files')) return;
+      dragDepth.current += 1;
+      setIsDragOver(true);
+    };
+    const onDragOver = (event: DragEvent) => {
+      if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+    };
+    const onDragLeave = () => {
+      dragDepth.current = Math.max(0, dragDepth.current - 1);
+      if (dragDepth.current === 0) setIsDragOver(false);
+    };
+    const onDrop = (event: DragEvent) => {
+      if (!event.dataTransfer?.types.includes('Files')) return;
+      event.preventDefault();
+      dragDepth.current = 0;
+      setIsDragOver(false);
+
+      const files = Array.from(event.dataTransfer.files).filter((file) => isFontFile(file.name));
+      const rejected = event.dataTransfer.files.length - files.length;
+
+      if (files.length > 0) void handleFilesSelected(files);
+      if (rejected > 0) {
+        notify(`Ignored ${rejected} file${rejected > 1 ? 's' : ''} that are not fonts`, 'error');
+      }
+    };
+
+    window.addEventListener('dragenter', onDragEnter);
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('dragleave', onDragLeave);
+    window.addEventListener('drop', onDrop);
+
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter);
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('dragleave', onDragLeave);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, [handleFilesSelected, notify]);
+
+  /* ---------------- derived ---------------- */
+
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const list = fonts.filter((font) => {
+      if (formatFilter !== 'all' && font.originalFormat !== formatFilter) return false;
+      if (!needle) return true;
+      return (
+        font.family.toLowerCase().includes(needle) ||
+        font.subfamily.toLowerCase().includes(needle) ||
+        font.fileName.toLowerCase().includes(needle) ||
+        font.names.designer.toLowerCase().includes(needle)
+      );
+    });
+
+    const sorted = [...list];
+    if (sortKey === 'family') {
+      sorted.sort(
+        (a, b) => a.family.localeCompare(b.family) || a.weight - b.weight
+      );
+    } else if (sortKey === 'weight') {
+      sorted.sort((a, b) => a.weight - b.weight || a.family.localeCompare(b.family));
+    } else if (sortKey === 'size') {
+      sorted.sort((a, b) => b.originalSize - a.originalSize);
+    }
+    return sorted;
+  }, [fonts, query, formatFilter, sortKey]);
+
+  const selected = useMemo(() => fonts.filter((font) => font.isSelected), [fonts]);
+  /** Bulk actions apply to the selection, or to everything when nothing is ticked. */
+  const workingSet = selected.length > 0 ? selected : fonts;
+
+  const allVisibleSelected = visible.length > 0 && visible.every((font) => font.isSelected);
+  const someVisibleSelected = visible.some((font) => font.isSelected);
+
+  const editFont = fonts.find((font) => font.id === editId) || null;
+  const charMapFont = fonts.find((font) => font.id === charMapId) || null;
+  const specimenFont = fonts.find((font) => font.id === specimenId) || null;
+
+  /* ---------------- mutations ---------------- */
+
+  const patchFont = (id: string, patch: Partial<FontItem>) =>
+    setFonts((prev) => prev.map((font) => (font.id === id ? { ...font, ...patch } : font)));
+
+  const handleToggleSelect = (id: string) =>
+    setFonts((prev) =>
+      prev.map((font) => (font.id === id ? { ...font, isSelected: !font.isSelected } : font))
+    );
+
+  const handleSelectAllVisible = (select: boolean) => {
+    const ids = new Set(visible.map((font) => font.id));
+    setFonts((prev) =>
+      prev.map((font) => (ids.has(font.id) ? { ...font, isSelected: select } : font))
+    );
+  };
+
+  const handleChangeTargetFormat = (id: string, format: FontFormat) =>
+    patchFont(id, {
+      targetFormat: format,
+      fileName: replaceExtension(
+        fonts.find((font) => font.id === id)?.fileName || `font.${format}`,
+        format
+      ),
+      convertedBuffer: null,
+      convertedSize: null,
+      status: 'idle'
+    });
+
+  const handleDeleteFont = (id: string) => {
+    releaseFontFace(id);
+    setFonts((prev) => prev.filter((font) => font.id !== id));
+    if (editId === id) setEditId(null);
+    if (charMapId === id) setCharMapId(null);
+    if (specimenId === id) setSpecimenId(null);
+  };
+
+  const handleClearAll = () => {
+    for (const font of fonts) releaseFontFace(font.id);
+    setFonts([]);
+    setConfirmClear(false);
+    notify('Library cleared');
+  };
+
+  /** Re-parses an edited sfnt and swaps in a fresh preview face. */
+  const refreshPreview = (font: FontItem, sfntBuffer: ArrayBuffer, family: string) => ({
+    fontFaceFamily: registerFontFace(font.id, family, sfntBuffer, font.outlineFlavor)
+  });
+
+  const handleSaveMetadata = (id: string, draft: MetadataDraft) => {
+    const font = fonts.find((item) => item.id === id);
+    if (!font) return;
+
+    try {
+      const sfntBuffer = writeMetadataToSfnt(font.sfntBuffer, {
+        family: draft.family,
+        subfamily: draft.subfamily,
+        weight: draft.weight,
+        isItalic: draft.isItalic,
+        isBold: draft.isBold,
+        names: draft.names
+      });
+
+      patchFont(id, {
+        family: draft.family,
+        subfamily: draft.subfamily,
+        weight: draft.weight,
+        isItalic: draft.isItalic,
+        isBold: draft.isBold,
+        names: draft.names,
+        fileName: replaceExtension(draft.fileName, font.targetFormat),
+        sfntBuffer,
+        convertedBuffer: null,
+        convertedSize: null,
+        status: 'idle',
+        errorMessage: undefined,
+        isEdited: true,
+        ...refreshPreview(font, sfntBuffer, draft.family)
+      });
+
+      notify(`Saved ${draft.family} ${draft.subfamily}`, 'success');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not write the metadata';
+      patchFont(id, { status: 'error', errorMessage: message });
+      notify(`Could not save ${font.family}: ${message}`, 'error');
+    }
+  };
+
+  const handleApplyBatchRename = (results: BatchRenameResult[]) => {
+    let applied = 0;
+    const problems: string[] = [];
+
+    setFonts((prev) =>
+      prev.map((font) => {
+        const result = results.find((item) => item.id === font.id);
+        if (!result) return font;
+
+        try {
+          // Only the fields the batch tool owns are passed. Designer,
+          // copyright, trademark and licence are left undefined, so they are
+          // carried through untouched rather than dropped.
+          const sfntBuffer = writeMetadataToSfnt(font.sfntBuffer, {
+            family: result.family,
+            subfamily: result.subfamily,
+            weight: result.weight,
+            isItalic: result.isItalic,
+            isBold: result.isBold,
+            names: {
+              fullName: result.fullName,
+              postScriptName: result.postScriptName
+            }
+          });
+
+          applied += 1;
+
+          return {
+            ...font,
+            family: result.family,
+            subfamily: result.subfamily,
+            weight: result.weight,
+            isItalic: result.isItalic,
+            isBold: result.isBold,
+            names: {
+              ...font.names,
+              fullName: result.fullName,
+              postScriptName: result.postScriptName
+            },
+            fileName: replaceExtension(result.fileName, font.targetFormat),
+            sfntBuffer,
+            convertedBuffer: null,
+            convertedSize: null,
+            status: 'idle' as const,
+            errorMessage: undefined,
+            isEdited: true,
+            ...refreshPreview(font, sfntBuffer, result.family)
+          };
+        } catch (err) {
+          problems.push(`${font.fileName}: ${err instanceof Error ? err.message : 'failed'}`);
+          return { ...font, status: 'error' as const, errorMessage: 'Rename failed' };
+        }
+      })
+    );
+
+    if (applied > 0) notify(`Renamed ${applied} font${applied > 1 ? 's' : ''}`, 'success');
+    for (const problem of problems) notify(problem, 'error');
+  };
+
+  const handleRevert = (id: string) => {
+    const font = fonts.find((item) => item.id === id);
+    if (!font) return;
+
+    const metadata = readMetadataFromSfnt(font.originalSfntBuffer, font.originalFileName);
+    patchFont(id, {
+      family: metadata.family,
+      subfamily: metadata.subfamily,
+      names: metadata.names,
+      weight: metadata.weight,
+      isItalic: metadata.isItalic,
+      isBold: metadata.isBold,
+      fileName: replaceExtension(font.originalFileName, font.targetFormat),
+      sfntBuffer: font.originalSfntBuffer,
+      convertedBuffer: null,
+      convertedSize: null,
+      status: 'idle',
+      errorMessage: undefined,
+      isEdited: false,
+      ...refreshPreview(font, font.originalSfntBuffer, metadata.family)
+    });
+    notify(`Reverted ${font.originalFileName}`);
+  };
+
+  /* ---------------- export ---------------- */
+
+  const handleExportSingle = async (font: FontItem) => {
+    patchFont(font.id, { status: 'converting' });
+    try {
+      const output = await packSfnt(font.sfntBuffer, font.targetFormat);
+      const outName = replaceExtension(font.fileName, font.targetFormat);
+
+      patchFont(font.id, {
+        status: 'success',
+        convertedBuffer: output,
+        convertedSize: output.byteLength,
+        fileName: outName,
+        errorMessage: undefined
+      });
+
+      saveAs(new Blob([output], { type: mimeTypeFor(font.targetFormat) }), outName);
+      notify(`Exported ${outName}`, 'success');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Conversion failed';
+      patchFont(font.id, { status: 'error', errorMessage: message });
+      notify(`${font.fileName}: ${message}`, 'error');
+    }
+  };
+
+  const handleConvertAll = async (target: FontFormat) => {
+    const list = workingSet;
+    if (list.length === 0) return;
+
+    setIsBusy(true);
+    let done = 0;
+
+    for (let i = 0; i < list.length; i++) {
+      const font = list[i];
+      setProgress({ current: i + 1, total: list.length, name: font.fileName });
+
+      try {
+        const output = await packSfnt(font.sfntBuffer, target);
+        const outName = replaceExtension(font.fileName, target);
+        patchFont(font.id, {
+          targetFormat: target,
+          fileName: outName,
+          convertedBuffer: output,
+          convertedSize: output.byteLength,
+          status: 'success',
+          errorMessage: undefined
+        });
+        done += 1;
+      } catch (err) {
+        patchFont(font.id, {
+          status: 'error',
+          errorMessage: err instanceof Error ? err.message : 'Conversion failed'
+        });
       }
     }
 
-    // Add CSS definitions to zip
-    const cssRules = targetList.map(font => {
-      const formatStr = 
-        font.targetFormat === 'woff2' ? "format('woff2')" :
-        font.targetFormat === 'woff' ? "format('woff')" :
-        font.targetFormat === 'otf' ? "format('opentype')" :
-        "format('truetype')";
-      const fontStyle = font.isItalic ? 'italic' : 'normal';
-      const base = font.fileName.replace(/\.[^.]+$/, '');
-      const fontFile = `${base}.${font.targetFormat}`;
-
-      return `@font-face {
-  font-family: '${font.family}';
-  src: url('./${fontFile}') ${formatStr};
-  font-weight: ${font.weight};
-  font-style: ${fontStyle};
-  font-display: swap;
-}`;
-    }).join('\n\n');
-
-    zip.file('fonts.css', `/* TypeForge Exported Font Styles */\n\n${cssRules}\n`);
-
-    const zipBlob = await zip.generateAsync({ type: 'blob' });
-    saveAs(zipBlob, 'TypeForge_Fonts_Bundle.zip');
-
-    setIsConverting(false);
+    setIsBusy(false);
     setProgress(null);
-    showToast(`Downloaded ZIP archive with ${targetList.length} fonts!`, 'success');
+    notify(
+      done === list.length
+        ? `Converted ${done} font${done > 1 ? 's' : ''} to .${target}`
+        : `Converted ${done} of ${list.length} to .${target}`,
+      done === list.length ? 'success' : 'error'
+    );
   };
 
-  const selectedFonts = fonts.filter(f => f.isSelected);
+  const handleDownloadZip = async () => {
+    const list = workingSet;
+    if (list.length === 0) return;
+
+    setIsBusy(true);
+    const zip = new JSZip();
+    const taken = new Set<string>();
+    const bundled: FontItem[] = [];
+
+    for (let i = 0; i < list.length; i++) {
+      const font = list[i];
+      setProgress({ current: i + 1, total: list.length, name: font.fileName });
+
+      try {
+        const output = font.convertedBuffer || (await packSfnt(font.sfntBuffer, font.targetFormat));
+        const name = uniqueFileName(replaceExtension(font.fileName, font.targetFormat), taken);
+        taken.add(name.toLowerCase());
+        zip.file(name, output);
+        bundled.push({ ...font, fileName: name });
+      } catch (err) {
+        patchFont(font.id, {
+          status: 'error',
+          errorMessage: err instanceof Error ? err.message : 'Could not archive'
+        });
+      }
+    }
+
+    if (bundled.length > 0) {
+      zip.file('fonts.css', buildFontFaceCss(bundled, '.', true));
+
+      const readme = [
+        'TYPEFORGE EXPORT',
+        '',
+        ...bundled.map(
+          (font) =>
+            `${font.fileName}  —  ${font.family} ${font.subfamily}, weight ${font.weight}${
+              font.isItalic ? ', italic' : ''
+            }${font.names.designer ? `, by ${font.names.designer}` : ''}`
+        ),
+        '',
+        'Outlines, hinting and layout tables are carried over from the source files unchanged.',
+        'Renaming a typeface does not relicense it — check each licence before redistributing.',
+        ''
+      ].join('\n');
+      zip.file('README.txt', readme);
+
+      const blob = await zip.generateAsync({ type: 'blob' });
+      saveAs(blob, `typeforge-${new Date().toISOString().slice(0, 10)}.zip`);
+      notify(`Bundled ${bundled.length} font${bundled.length > 1 ? 's' : ''}`, 'success');
+    } else {
+      notify('Nothing could be bundled', 'error');
+    }
+
+    setIsBusy(false);
+    setProgress(null);
+  };
+
+  /* ---------------- render ---------------- */
+
+  const hasFonts = fonts.length > 0;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col selection:bg-indigo-500/30 selection:text-indigo-200">
-      
-      {/* Toast Notification */}
-      {toast && (
-        <div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-5 fade-in duration-200">
-          <div className={`px-4 py-3 rounded-2xl shadow-2xl border flex items-center space-x-3 text-xs font-semibold backdrop-blur-lg ${
-            toast.type === 'success' ? 'bg-emerald-950/90 border-emerald-500/30 text-emerald-200' :
-            toast.type === 'error' ? 'bg-rose-950/90 border-rose-500/30 text-rose-200' :
-            'bg-indigo-950/90 border-indigo-500/30 text-indigo-200'
-          }`}>
-            {toast.type === 'success' ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> :
-             toast.type === 'error' ? <AlertCircle className="w-4 h-4 text-rose-400" /> :
-             <Sparkles className="w-4 h-4 text-indigo-400" />}
-            <span>{toast.message}</span>
-          </div>
-        </div>
-      )}
-
-      {/* Conversion Progress Bar */}
-      {progress && (
-        <div className="fixed top-0 left-0 right-0 z-50 bg-indigo-600/90 backdrop-blur-md px-4 py-2 flex items-center justify-between text-xs font-semibold text-white shadow-lg">
-          <div className="flex items-center space-x-2">
-            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            <span>Processing ({progress.current}/{progress.total}): <strong className="font-mono">{progress.name}</strong></span>
-          </div>
-          <div className="w-32 bg-indigo-900 rounded-full h-2 overflow-hidden">
-            <div 
-              className="bg-white h-full transition-all duration-150"
+    <div className="sheet">
+      {progress ? (
+        <div className="progress">
+          <Icon name="refresh" className="spin" />
+          <span className="truncate">
+            {progress.current}/{progress.total} — {progress.name}
+          </span>
+          <div className="track">
+            <div
+              className="fill"
               style={{ width: `${(progress.current / progress.total) * 100}%` }}
             />
           </div>
         </div>
-      )}
+      ) : null}
 
-      {/* Header */}
-      <Header
-        fonts={fonts}
-        selectedFonts={selectedFonts}
-        onConvertAll={handleConvertAll}
-        onOpenBatchRename={() => setIsBatchRenameOpen(true)}
-        onOpenCssExport={() => setIsCssExportOpen(true)}
-        onDownloadAllZip={handleDownloadAllZip}
-        onClearAll={() => setFonts([])}
-        isConverting={isConverting}
-      />
+      {isDragOver ? (
+        <div className="veil">
+          <div>
+            <div className="dot">DROP TO LOAD</div>
+            <p style={{ marginTop: 14, letterSpacing: '0.14em', fontSize: 11 }}>
+              WOFF2 · WOFF · TTF · OTF
+            </p>
+          </div>
+        </div>
+      ) : null}
 
-      {/* Main Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        
-        {/* Dropzone */}
+      <Masthead loadedCount={fonts.length} />
+
+      {/* ============ A / LOAD ============ */}
+      <Bar index="A" title="LOAD FONTS" count={hasFonts ? String(fonts.length) : undefined} />
+      <div className="row row--one">
         <FileDropzone
           onFilesSelected={handleFilesSelected}
           isLoading={isLoading}
+          isDragOver={isDragOver}
         />
+      </div>
 
-        {/* Font List & Management */}
-        {fonts.length > 0 && (
-          <FontListTable
-            fonts={fonts}
-            onToggleSelect={handleToggleSelect}
-            onSelectAll={handleSelectAll}
-            onChangeTargetFormat={handleChangeTargetFormat}
-            onConvertSingle={handleConvertSingle}
-            onDownloadSingle={handleConvertSingle}
-            onDeleteFont={handleDeleteFont}
-            onOpenCharacterMap={(font) => setCharacterMapFont(font)}
-            onOpenPlayground={(font) => setPlaygroundFont(font)}
-            onOpenEditSingle={(font) => setEditSingleFont(font)}
-          />
-        )}
+      {hasFonts ? (
+        <>
+          {/* ============ B / LIBRARY ============ */}
+          <Bar
+            index="B"
+            title="LIBRARY"
+            count={`${visible.length}${selected.length ? ` · ${selected.length} SELECTED` : ''}`}
+          >
+            <div className="seg">
+              <button type="button" aria-pressed={!compact} onClick={() => setCompact(false)}>
+                GRID
+              </button>
+              <button type="button" aria-pressed={compact} onClick={() => setCompact(true)}>
+                LIST
+              </button>
+            </div>
+          </Bar>
 
-      </main>
+          <div className="row row--one">
+            <div className="cell" style={{ padding: '20px 26px' }}>
+              <div className="spread">
+                <label className="field grow" style={{ maxWidth: 280 }}>
+                  <span className="sr-only">Search the library</span>
+                  <input
+                    className="input input--plain"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="Search family, style, file or author"
+                    spellCheck={false}
+                  />
+                </label>
 
-      {/* Modals */}
-      <BatchRenameModal
-        selectedFonts={selectedFonts}
-        allFonts={fonts}
-        isOpen={isBatchRenameOpen}
-        onClose={() => setIsBatchRenameOpen(false)}
-        onApplyBatchRename={handleApplyBatchRename}
-      />
+                <label className="field grow" style={{ maxWidth: 260 }}>
+                  <span className="sr-only">Preview text</span>
+                  <input
+                    className="input input--plain"
+                    value={sampleText}
+                    onChange={(event) => setSampleText(event.target.value)}
+                    placeholder="Preview text"
+                  />
+                </label>
 
-      <CharacterMapModal
-        font={characterMapFont}
-        onClose={() => setCharacterMapFont(null)}
-      />
+                <label className="field">
+                  <span className="sr-only">Filter by source format</span>
+                  <select
+                    className="select"
+                    value={formatFilter}
+                    onChange={(event) =>
+                      setFormatFilter(event.target.value as 'all' | FontFormat)
+                    }
+                  >
+                    <option value="all">ALL FORMATS</option>
+                    {FONT_FORMATS.map((format) => (
+                      <option key={format} value={format}>
+                        {format.toUpperCase()}
+                      </option>
+                    ))}
+                  </select>
+                </label>
 
-      <TextPlaygroundModal
-        font={playgroundFont}
-        onClose={() => setPlaygroundFont(null)}
-      />
+                <label className="field">
+                  <span className="sr-only">Sort</span>
+                  <select
+                    className="select"
+                    value={sortKey}
+                    onChange={(event) => setSortKey(event.target.value as SortKey)}
+                  >
+                    <option value="added">ORDER ADDED</option>
+                    <option value="family">FAMILY A–Z</option>
+                    <option value="weight">WEIGHT</option>
+                    <option value="size">SIZE</option>
+                  </select>
+                </label>
+              </div>
 
-      <SingleFontEditModal
-        font={editSingleFont}
-        isOpen={!!editSingleFont}
-        onClose={() => setEditSingleFont(null)}
-        onSave={handleSaveSingleFont}
-      />
+              <div className="spread" style={{ marginTop: 20 }}>
+                <Check
+                  checked={allVisibleSelected}
+                  indeterminate={someVisibleSelected}
+                  onChange={handleSelectAllVisible}
+                  label={`SELECT ALL SHOWN (${visible.length})`}
+                />
 
-      <CssExportModal
-        fonts={selectedFonts.length > 0 ? selectedFonts : fonts}
-        isOpen={isCssExportOpen}
-        onClose={() => setIsCssExportOpen(false)}
-      />
+                <div className="inline">
+                  <span className="count faint">CONVERT ALL TO</span>
+                  {FONT_FORMATS.map((format) => (
+                    <button
+                      key={format}
+                      type="button"
+                      className="btn btn--sm"
+                      disabled={isBusy}
+                      onClick={() => handleConvertAll(format)}
+                    >
+                      .{format}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
+              <div className="spread" style={{ marginTop: 16 }}>
+                <span className="count faint">
+                  ACTIONS APPLY TO {selected.length > 0 ? `${selected.length} SELECTED` : 'ALL FONTS'}
+                </span>
+                <div className="inline">
+                  <button
+                    type="button"
+                    className="btn btn--sm"
+                    onClick={() => setBatchOpen(true)}
+                    disabled={workingSet.length === 0}
+                  >
+                    <Icon name="layers" /> BATCH RENAME
+                  </button>
+                  <button type="button" className="btn btn--sm" onClick={() => setCssOpen(true)}>
+                    <Icon name="code" /> CSS
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--sm btn--solid"
+                    onClick={handleDownloadZip}
+                    disabled={isBusy}
+                  >
+                    <Icon name="package" /> DOWNLOAD ZIP
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--sm btn--danger"
+                    onClick={() => setConfirmClear(true)}
+                  >
+                    <Icon name="trash" /> CLEAR
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className={`row${compact ? ' row--list' : ''}`}>
+            {visible.map((font, index) => (
+              <FontCard
+                key={font.id}
+                font={font}
+                index={index}
+                sampleText={sampleText}
+                onToggleSelect={handleToggleSelect}
+                onChangeTargetFormat={handleChangeTargetFormat}
+                onDownload={handleExportSingle}
+                onDelete={handleDeleteFont}
+                onRevert={handleRevert}
+                onOpenCharacterMap={(item) => setCharMapId(item.id)}
+                onOpenSpecimen={(item) => setSpecimenId(item.id)}
+                onOpenEdit={(item) => setEditId(item.id)}
+              />
+            ))}
+          </div>
+
+          {visible.length === 0 ? (
+            <div className="row row--one">
+              <div className="cell">
+                <div className="empty">NOTHING MATCHES THIS SEARCH</div>
+              </div>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+
+      {/* ============ F / G / H ============ */}
+      <AuthorSection />
+      <Foot />
+
+      {/* ---------- modals ---------- */}
+      {editFont ? (
+        <MetadataModal
+          key={editFont.id}
+          font={editFont}
+          onClose={() => setEditId(null)}
+          onSave={handleSaveMetadata}
+        />
+      ) : null}
+
+      {batchOpen && workingSet.length > 0 ? (
+        <BatchRenameModal
+          fonts={workingSet}
+          onClose={() => setBatchOpen(false)}
+          onApply={handleApplyBatchRename}
+        />
+      ) : null}
+
+      {charMapFont ? (
+        <CharacterMapModal
+          key={charMapFont.id}
+          font={charMapFont}
+          onClose={() => setCharMapId(null)}
+          onNotify={notify}
+        />
+      ) : null}
+
+      {specimenFont ? (
+        <SpecimenModal
+          key={specimenFont.id}
+          font={specimenFont}
+          onClose={() => setSpecimenId(null)}
+        />
+      ) : null}
+
+      {cssOpen ? (
+        <CssExportModal
+          fonts={workingSet}
+          onClose={() => setCssOpen(false)}
+          onNotify={notify}
+        />
+      ) : null}
+
+      {confirmClear ? (
+        <Modal
+          index="!"
+          title="CLEAR THE LIBRARY"
+          onClose={() => setConfirmClear(false)}
+          narrow
+          footer={
+            <>
+              <span className="note">NOTHING IS SAVED ANYWHERE ELSE</span>
+              <div className="acts">
+                <button type="button" className="btn" onClick={() => setConfirmClear(false)}>
+                  KEEP THEM
+                </button>
+                <button type="button" className="btn btn--solid" onClick={handleClearAll}>
+                  <Icon name="trash" /> CLEAR {fonts.length}
+                </button>
+              </div>
+            </>
+          }
+        >
+          <div className="cell">
+            <Notice kind="warn">
+              REMOVING {fonts.length} FONT{fonts.length > 1 ? 'S' : ''} FROM THIS SHEET.{' '}
+              {fonts.some((font) => font.isEdited)
+                ? 'SOME HAVE UNEXPORTED METADATA EDITS THAT WILL BE LOST.'
+                : 'YOUR ORIGINAL FILES ON DISK ARE NOT TOUCHED.'}
+            </Notice>
+          </div>
+        </Modal>
+      ) : null}
+
+      <div className="toasts">
+        {toasts.map((toast) => (
+          <div key={toast.id} className="toast" data-kind={toast.kind} role="status">
+            <Icon name={toast.kind === 'error' ? 'warn' : toast.kind === 'success' ? 'check' : 'info'} />
+            <span className="plain">{toast.message}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
+

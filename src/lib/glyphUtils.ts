@@ -1,4 +1,4 @@
-﻿import type { Font as OpentypeFont } from 'opentype.js';
+import type { Font as OpentypeFont } from 'opentype.js';
 import type { GlyphDetail } from '../types/font';
 
 export interface UnicodeCategory {
@@ -54,10 +54,11 @@ export function extractGlyphsFromFont(font: OpentypeFont): GlyphDetail[] {
     const unicodeHex = unicode !== undefined ? `U+${unicode.toString(16).toUpperCase().padStart(4, '0')}` : undefined;
     const category = getUnicodeCategory(unicode);
     
+    // Drawn at the font's own em size so the inspector can label real
+    // font units rather than pixels.
     let pathSvg = '';
     try {
-      const p = glyph.getPath(0, 0, 72);
-      pathSvg = p.toPathData(2);
+      pathSvg = glyph.getPath(0, 0, font.unitsPerEm || 1000).toPathData(2);
     } catch {
       pathSvg = '';
     }
@@ -75,8 +76,7 @@ export function extractGlyphsFromFont(font: OpentypeFont): GlyphDetail[] {
       xMax: glyph.xMax,
       yMin: glyph.yMin,
       yMax: glyph.yMax,
-      pathSvg,
-      pathCmds: glyph.path ? glyph.path.commands : []
+      pathSvg
     });
   }
   

@@ -1,28 +1,31 @@
-import type { Font as OpentypeFont } from 'opentype.js';
-import { CasingOption } from '../types/font';
+import {
+  NAME_ID,
+  applyNameEdits,
+  buildNameTable,
+  buildSfnt,
+  getTable,
+  parseNameTable,
+  parseSfnt,
+  patchHead,
+  patchOs2,
+  readName,
+  readOs2,
+  setTable
+} from './sfnt';
+import type { CasingOption, FontNameFields } from '../types/font';
 
 export interface ExtractedFontMetadata {
   family: string;
   subfamily: string;
-  fullName: string;
-  postScriptName: string;
-  uniqueId: string;
-  version: string;
+  names: FontNameFields;
   weight: number;
   isItalic: boolean;
   isBold: boolean;
-  unitsPerEm: number;
-  ascender: number;
-  descender: number;
-  numGlyphs: number;
-  copyright?: string;
-  designer?: string;
-  manufacturer?: string;
 }
 
-export function cleanFontString(str?: string): string {
-  if (!str) return '';
-  return str.replace(/\0/g, '').trim();
+export function cleanFontString(value?: string): string {
+  if (!value) return '';
+  return value.replace(/\0/g, '').trim();
 }
 
 export function detectWeightAndStyle(
@@ -31,8 +34,8 @@ export function detectWeightAndStyle(
   existingSubfamily?: string
 ): { weight: number; styleName: string; isItalic: boolean; isBold: boolean } {
   const combined = `${fileName} ${existingFamily || ''} ${existingSubfamily || ''}`.toLowerCase();
-  
-  const isItalic = /italic|oblique|obl/i.test(combined);
+
+  const isItalic = /italic|oblique|obl\b/i.test(combined);
   let weight = 400;
   let weightName = 'Regular';
 
@@ -72,7 +75,7 @@ export function detectWeightAndStyle(
   }
 
   const isBold = weight >= 700;
-  
+
   let finalStyle = weightName;
   if (isItalic) {
     finalStyle = weightName === 'Regular' ? 'Italic' : `${weightName} Italic`;
@@ -81,18 +84,25 @@ export function detectWeightAndStyle(
   return { weight, styleName: finalStyle, isItalic, isBold };
 }
 
+/**
+ * PostScript names may only use printable ASCII minus `[](){}<>/%` and space,
+ * and are capped at 63 characters.
+ */
 export function sanitizePostScriptName(name: string): string {
-  return name
-    .replace(/[^\w-]/g, '')
-    .replace(/_{2,}/g, '_')
-    .slice(0, 63) || 'Font-Regular';
+  return (
+    name
+      .replace(/\s+/g, '')
+      .replace(/[^\x21-\x7E]/g, '')
+      .replace(/[[\](){}<>/%]/g, '')
+      .slice(0, 63) || 'Font-Regular'
+  );
 }
 
 export function applyCasing(text: string, casing: CasingOption): string {
   if (!text) return text;
-  
+
   const words = text
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/[_-]+/g, ' ')
     .trim()
     .split(/\s+/)
@@ -100,19 +110,23 @@ export function applyCasing(text: string, casing: CasingOption): string {
 
   switch (casing) {
     case 'kebab':
-      return words.map(w => w.toLowerCase()).join('-');
+      return words.map((w) => w.toLowerCase()).join('-');
     case 'snake':
-      return words.map(w => w.toLowerCase()).join('_');
+      return words.map((w) => w.toLowerCase()).join('_');
     case 'camel':
-      return words.map((w, i) => i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('');
+      return words
+        .map((w, i) =>
+          i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+        )
+        .join('');
     case 'pascal':
-      return words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('');
+      return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('');
     case 'title':
-      return words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+      return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
     case 'lower':
-      return words.map(w => w.toLowerCase()).join(' ');
+      return words.map((w) => w.toLowerCase()).join(' ');
     case 'upper':
-      return words.map(w => w.toUpperCase()).join(' ');
+      return words.map((w) => w.toUpperCase()).join(' ');
     case 'none':
     default:
       return text;
@@ -136,146 +150,158 @@ export function formatFileName(
 
   name = name.replace(/[<>:"/\\|?*]/g, '').trim();
   if (!name) name = 'font';
-  
+
   return `${name}.${vars.ext}`;
 }
 
-export function extractMetadataFromParsedFont(
-  font: OpentypeFont,
-  fileName: string
-): ExtractedFontMetadata {
-  const namesObj = font.names as any;
-  const win = namesObj?.windows;
-  const mac = namesObj?.macintosh;
-  const uni = namesObj?.unicode;
-
-  const getRawName = (field: string): string => {
-    const val = win?.[field]?.en || mac?.[field]?.en || uni?.[field]?.en || 
-                namesObj?.[field]?.en || namesObj?.[field];
-    return cleanFontString(typeof val === 'string' ? val : '');
-  };
-
-  let family = getRawName('fontFamily') || getRawName('preferredFamily') || getRawName('wwsFamily');
-  let subfamily = getRawName('fontSubfamily') || getRawName('preferredSubfamily') || getRawName('wwsSubfamily');
-  let fullName = getRawName('fullName');
-  let postScriptName = getRawName('postScriptName');
-  let uniqueId = getRawName('uniqueID') || `1.000;TypeForge;${postScriptName || 'font'}`;
-  let version = getRawName('version') || 'Version 1.000';
-  let copyright = getRawName('copyright');
-  let designer = getRawName('designer');
-  let manufacturer = getRawName('manufacturer');
-
-  if (!family || family.length < 2) {
-    const base = fileName.replace(/\.(woff2|woff|ttf|otf)$/i, '');
-    family = base.replace(/-(regular|bold|italic|black|light|medium|thin|heavy)/i, '').trim() || 'Custom Font';
-  }
-
-  const detected = detectWeightAndStyle(fileName, family, subfamily);
-  if (!subfamily || subfamily === ' ') {
-    subfamily = detected.styleName;
-  }
-
-  const weight = font.tables.os2?.usWeightClass || detected.weight;
-  const isItalic = (font.tables.os2?.fsSelection && (font.tables.os2.fsSelection & 1) !== 0) || detected.isItalic;
-  const isBold = weight >= 700 || detected.isBold;
-
-  if (!fullName) {
-    fullName = `${family} ${subfamily}`.trim();
-  }
-  if (!postScriptName) {
-    postScriptName = sanitizePostScriptName(`${family}-${subfamily}`);
-  }
-
+export function emptyNameFields(): FontNameFields {
   return {
-    family,
-    subfamily,
-    fullName,
-    postScriptName,
-    uniqueId,
-    version,
-    weight,
-    isItalic,
-    isBold,
-    unitsPerEm: font.unitsPerEm || 1000,
-    ascender: font.ascender || 800,
-    descender: font.descender || -200,
-    numGlyphs: font.glyphs ? font.glyphs.length : 0,
-    copyright,
-    designer,
-    manufacturer
+    fullName: '',
+    postScriptName: '',
+    uniqueId: '',
+    version: '',
+    copyright: '',
+    trademark: '',
+    designer: '',
+    manufacturer: '',
+    description: '',
+    designerURL: '',
+    vendorURL: '',
+    license: '',
+    licenseURL: ''
   };
 }
 
-export function updateFontMetadata(
-  font: OpentypeFont,
-  meta: {
-    family: string;
-    subfamily: string;
-    fullName?: string;
-    postScriptName?: string;
-    uniqueId?: string;
-    version?: string;
-    weight?: number;
-    isItalic?: boolean;
-    isBold?: boolean;
-    copyright?: string;
-    designer?: string;
-    manufacturer?: string;
-  }
-): ArrayBuffer {
-  const family = meta.family.trim();
-  const subfamily = meta.subfamily.trim();
-  const fullName = meta.fullName?.trim() || `${family} ${subfamily}`.trim();
-  const postScriptName = sanitizePostScriptName(meta.postScriptName?.trim() || `${family}-${subfamily}`);
-  const uniqueId = meta.uniqueId?.trim() || `1.000;TypeForge;${postScriptName}`;
-  const version = meta.version?.trim() || 'Version 1.000';
-  const weight = meta.weight !== undefined ? meta.weight : 400;
-  const isItalic = meta.isItalic ?? false;
-  const isBold = meta.isBold ?? (weight >= 700);
+/**
+ * Reads metadata straight out of the font's `name`, `OS/2` and `head` tables.
+ * Nothing here depends on a font parser's ability to *rewrite* the font.
+ */
+export function readMetadataFromSfnt(
+  sfntBuffer: ArrayBuffer,
+  fileName: string
+): ExtractedFontMetadata {
+  const sfnt = parseSfnt(sfntBuffer);
+  const records = parseNameTable(getTable(sfnt, 'name') || new Uint8Array(0));
+  const get = (id: number) => cleanFontString(readName(records, id));
 
-  const nameEntries: Record<string, { en: string }> = {
-    fontFamily: { en: family },
-    fontSubfamily: { en: subfamily },
-    fullName: { en: fullName },
-    postScriptName: { en: postScriptName },
-    uniqueID: { en: uniqueId },
-    version: { en: version },
-    preferredFamily: { en: family },
-    preferredSubfamily: { en: subfamily },
-    wwsFamily: { en: family },
-    wwsSubfamily: { en: subfamily }
+  let family = get(NAME_ID.fontFamily) || get(NAME_ID.preferredFamily) || get(NAME_ID.wwsFamily);
+  let subfamily =
+    get(NAME_ID.fontSubfamily) || get(NAME_ID.preferredSubfamily) || get(NAME_ID.wwsSubfamily);
+
+  if (!family || family.length < 2) {
+    const base = fileName.replace(/\.(woff2|woff|ttf|otf|ttc|otc)$/i, '');
+    family =
+      base.replace(/[-_](regular|bold|italic|black|light|medium|thin|heavy)$/i, '').trim() ||
+      'Custom Font';
+  }
+
+  const detected = detectWeightAndStyle(fileName, family, subfamily);
+  if (!subfamily) subfamily = detected.styleName;
+
+  const os2 = readOs2(getTable(sfnt, 'OS/2'));
+  const weight = os2?.usWeightClass || detected.weight;
+  const isItalic = os2 ? (os2.fsSelection & 1) !== 0 : detected.isItalic;
+  const isBold = os2 ? (os2.fsSelection & 32) !== 0 : detected.isBold;
+
+  const names: FontNameFields = {
+    fullName: get(NAME_ID.fullName) || `${family} ${subfamily}`.trim(),
+    postScriptName: get(NAME_ID.postScriptName) || sanitizePostScriptName(`${family}-${subfamily}`),
+    uniqueId: get(NAME_ID.uniqueID),
+    version: get(NAME_ID.version) || 'Version 1.000',
+    copyright: get(NAME_ID.copyright),
+    trademark: get(NAME_ID.trademark),
+    designer: get(NAME_ID.designer),
+    manufacturer: get(NAME_ID.manufacturer),
+    description: get(NAME_ID.description),
+    designerURL: get(NAME_ID.designerURL),
+    vendorURL: get(NAME_ID.vendorURL),
+    license: get(NAME_ID.license),
+    licenseURL: get(NAME_ID.licenseURL)
   };
 
-  if (meta.copyright) nameEntries.copyright = { en: meta.copyright };
-  if (meta.designer) nameEntries.designer = { en: meta.designer };
-  if (meta.manufacturer) nameEntries.manufacturer = { en: meta.manufacturer };
+  return { family, subfamily, names, weight, isItalic, isBold };
+}
 
-  // Set names on both windows and macintosh platforms
-  (font as any).names = {
-    macintosh: { ...nameEntries },
-    windows: { ...nameEntries }
+export interface MetadataPatch {
+  family?: string;
+  subfamily?: string;
+  weight?: number;
+  isItalic?: boolean;
+  isBold?: boolean;
+  names?: Partial<FontNameFields>;
+}
+
+/**
+ * Rewrites the `name`, `OS/2` and `head` tables of an sfnt and leaves every
+ * other table byte-for-byte identical.
+ *
+ * `undefined` fields are left alone, so a caller that only renames a family
+ * cannot wipe the designer, licence or trademark by omission. Passing an
+ * explicit empty string clears that entry.
+ */
+export function writeMetadataToSfnt(sfntBuffer: ArrayBuffer, patch: MetadataPatch): ArrayBuffer {
+  const sfnt = parseSfnt(sfntBuffer);
+  const records = parseNameTable(getTable(sfnt, 'name') || new Uint8Array(0));
+
+  const edits = new Map<number, string>();
+  const put = (id: number, value: string | undefined) => {
+    if (value === undefined) return;
+    edits.set(id, value.trim());
   };
 
-  // Update OS/2 table
-  if (font.tables.os2) {
-    font.tables.os2.usWeightClass = weight;
-    
-    let fsSelection = 0;
-    if (isItalic) fsSelection |= 1; // bit 0: ITALIC
-    if (isBold) fsSelection |= 32; // bit 5: BOLD
-    if (!isItalic && !isBold && weight === 400) fsSelection |= 64; // bit 6: REGULAR
-    fsSelection |= 128; // bit 7: USE_TYPO_METRICS
-    fsSelection |= 256; // bit 8: WWS
-    font.tables.os2.fsSelection = fsSelection;
+  const family = patch.family?.trim();
+  const subfamily = patch.subfamily?.trim();
+
+  if (family !== undefined) {
+    put(NAME_ID.fontFamily, family);
+    put(NAME_ID.preferredFamily, family);
+    put(NAME_ID.wwsFamily, family);
+  }
+  if (subfamily !== undefined) {
+    put(NAME_ID.fontSubfamily, subfamily);
+    put(NAME_ID.preferredSubfamily, subfamily);
+    put(NAME_ID.wwsSubfamily, subfamily);
   }
 
-  // Update head table
-  if (font.tables.head) {
-    let macStyle = 0;
-    if (isBold) macStyle |= 1; // bit 0: Bold
-    if (isItalic) macStyle |= 2; // bit 1: Italic
-    font.tables.head.macStyle = macStyle;
+  const names = patch.names || {};
+  put(NAME_ID.fullName, names.fullName);
+  put(NAME_ID.uniqueID, names.uniqueId);
+  put(NAME_ID.version, names.version);
+  put(NAME_ID.copyright, names.copyright);
+  put(NAME_ID.trademark, names.trademark);
+  put(NAME_ID.manufacturer, names.manufacturer);
+  put(NAME_ID.designer, names.designer);
+  put(NAME_ID.description, names.description);
+  put(NAME_ID.vendorURL, names.vendorURL);
+  put(NAME_ID.designerURL, names.designerURL);
+  put(NAME_ID.license, names.license);
+  put(NAME_ID.licenseURL, names.licenseURL);
+
+  if (names.postScriptName !== undefined) {
+    put(NAME_ID.postScriptName, sanitizePostScriptName(names.postScriptName));
   }
 
-  return font.toArrayBuffer();
+  if (edits.size > 0) {
+    setTable(sfnt, 'name', buildNameTable(applyNameEdits(records, edits)));
+  }
+
+  const os2Data = getTable(sfnt, 'OS/2');
+  if (os2Data && (patch.weight !== undefined || patch.isBold !== undefined || patch.isItalic !== undefined)) {
+    setTable(
+      sfnt,
+      'OS/2',
+      patchOs2(os2Data, {
+        usWeightClass: patch.weight,
+        isBold: patch.isBold,
+        isItalic: patch.isItalic
+      })
+    );
+  }
+
+  const headData = getTable(sfnt, 'head');
+  if (headData && (patch.isBold !== undefined || patch.isItalic !== undefined)) {
+    setTable(sfnt, 'head', patchHead(headData, { isBold: patch.isBold, isItalic: patch.isItalic }));
+  }
+
+  return buildSfnt(sfnt);
 }
