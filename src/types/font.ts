@@ -40,6 +40,7 @@ export interface FontItem {
   family: string;
   subfamily: string;
   names: FontNameFields;
+  vendorID?: string;
 
   // Metrics and weights
   weight: number;

@@ -390,39 +390,41 @@ export function buildNameTable(records: NameRecord[]): Uint8Array {
 /**
  * Applies `edits` (nameID -> new value) to an existing set of name records.
  *
- * For every edited ID the non-English records are dropped, because a localised
- * name for a family the user just renamed is stale. Records for IDs the user
- * did not touch are preserved exactly, so trademark, licence, description,
- * sample text and any other entry survive the edit.
+ * For every edited ID:
+ * - If value is empty: all records for this ID are removed.
+ * - If value is non-empty: we emit a clean Windows Unicode BMP record
+ *   (platformID: 3, encodingID: 1, languageID: 0x0409) which guarantees 100%
+ *   Unicode / Vietnamese diacritic support across all modern operating systems.
+ *   If the value can also be represented in MacRoman, we also emit a Macintosh
+ *   record (platformID: 1, encodingID: 0, languageID: 0).
  *
- * An empty string removes the ID entirely.
+ * Records for IDs the user did not touch are preserved exactly.
  */
 export function applyNameEdits(
   existing: NameRecord[],
   edits: Map<number, string>
 ): NameRecord[] {
   const out: NameRecord[] = [];
-  const written = new Set<number>();
 
+  // Keep all records that are not being edited
   for (const record of existing) {
     if (!edits.has(record.nameID)) {
       out.push(record);
-      continue;
     }
-
-    const value = edits.get(record.nameID)!;
-    if (!value) continue; // cleared by the user
-    if (!isEnglish(record.platformID, record.languageID)) continue; // stale localisation
-
-    out.push({ ...record, value });
-    written.add(record.nameID);
   }
 
-  // IDs the font did not carry yet get a fresh Windows + Macintosh pair.
-  for (const [nameID, value] of edits) {
-    if (!value || written.has(nameID)) continue;
+  // Add clean records for edited IDs
+  for (const [nameID, rawValue] of edits) {
+    const value = rawValue !== undefined ? rawValue.trim() : '';
+    if (!value) continue; // cleared by the user
+
+    // Always provide Windows Unicode (BMP) record (Platform 3, Encoding 1, English US)
     out.push({ platformID: 3, encodingID: 1, languageID: 0x0409, nameID, value });
-    out.push({ platformID: 1, encodingID: 0, languageID: 0, nameID, value });
+
+    // If representable in legacy MacRoman, also provide Macintosh record
+    if (encodeMacRoman(value) !== null) {
+      out.push({ platformID: 1, encodingID: 0, languageID: 0, nameID, value });
+    }
   }
 
   return out;

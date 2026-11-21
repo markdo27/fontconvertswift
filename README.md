@@ -57,18 +57,41 @@ family cannot silently change how it line-spaces.
 Entries you do not edit are preserved, including localised names for other languages. Every
 font keeps its as-loaded bytes, so **Revert** restores the original metadata at any time.
 
-### Batch rename and normalise families
+### Batch rename and metadata editing
 
 - Group many files under one family name so Windows, macOS, Figma and Adobe apps show them
   as a single family with selectable weights.
 - Auto-detect weight and italic from filenames (`Thin` → 100 … `Ultra` → 950) and write the
   matching `usWeightClass` and `macStyle`.
+- **Batch edit attribution and credit**: set Designer / Author, Manufacturer / Foundry,
+  URLs, Copyright, Trademark, Licence, Description and OS/2 Vendor ID (`achVendID`) across
+  all selected fonts in one go.
+- **Quick presets**:
+  * **Preset Vinafont**: 1-click apply Mark Do / Vinafont branding and SIL OFL 1.1 licence.
+  * **Clear All Credit**: 1-click strip all attribution, notices and vendor metadata.
+- **Auto-generate Unique ID** (`name ID 3`): generates `{version};{vendor};{postScriptName}`.
+- **Unicode & Vietnamese diacritics safe**: always writes clean Windows UTF-16BE (3,1,0x409)
+  and legacy MacRoman (1,0,0) without dropping Vietnamese diacritics.
 - Find and replace across family and style names, with optional regex.
 - Filename templates — `{family}`, `{style}`, `{weight}`, `{psname}` — with `kebab-case`,
   `snake_case`, `camelCase`, `PascalCase`, `Title Case`, `lowercase` and `UPPERCASE`.
 - Per-row overrides: edit any row and it pins, so the bulk controls stop overwriting it.
 - Colliding output names are detected up front and de-duplicated on export.
-- Author, copyright, trademark and licence are **not** touched by a batch rename.
+
+### CLI Metadata Tool (`tools/clean_metadata.py`)
+
+For deep offline font processing using `fontTools`:
+
+```bash
+# Inspect all tables, name records, OS/2 and CFF Top DICT
+python tools/clean_metadata.py inspect path/to/font.otf
+
+# Deep clean metadata with Vinafont preset across a folder
+python tools/clean_metadata.py clean path/to/fonts/ --preset vinafont --auto-unique-id
+
+# Strip all old credit/author/licence from CFF Top DICT and name table
+python tools/clean_metadata.py clean path/to/fonts/ --clear-credit --in-place
+```
 
 ### Inspect
 
