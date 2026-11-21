@@ -21,6 +21,7 @@ export interface ExtractedFontMetadata {
   weight: number;
   isItalic: boolean;
   isBold: boolean;
+  vendorID?: string;
 }
 
 export function cleanFontString(value?: string): string {
@@ -202,6 +203,7 @@ export function readMetadataFromSfnt(
   const weight = os2?.usWeightClass || detected.weight;
   const isItalic = os2 ? (os2.fsSelection & 1) !== 0 : detected.isItalic;
   const isBold = os2 ? (os2.fsSelection & 32) !== 0 : detected.isBold;
+  const vendorID = os2?.achVendID;
 
   const names: FontNameFields = {
     fullName: get(NAME_ID.fullName) || `${family} ${subfamily}`.trim(),
@@ -219,7 +221,7 @@ export function readMetadataFromSfnt(
     licenseURL: get(NAME_ID.licenseURL)
   };
 
-  return { family, subfamily, names, weight, isItalic, isBold };
+  return { family, subfamily, names, weight, isItalic, isBold, vendorID };
 }
 
 export interface MetadataPatch {
@@ -228,6 +230,7 @@ export interface MetadataPatch {
   weight?: number;
   isItalic?: boolean;
   isBold?: boolean;
+  vendorID?: string;
   names?: Partial<FontNameFields>;
 }
 
@@ -286,14 +289,21 @@ export function writeMetadataToSfnt(sfntBuffer: ArrayBuffer, patch: MetadataPatc
   }
 
   const os2Data = getTable(sfnt, 'OS/2');
-  if (os2Data && (patch.weight !== undefined || patch.isBold !== undefined || patch.isItalic !== undefined)) {
+  if (
+    os2Data &&
+    (patch.weight !== undefined ||
+      patch.isBold !== undefined ||
+      patch.isItalic !== undefined ||
+      patch.vendorID !== undefined)
+  ) {
     setTable(
       sfnt,
       'OS/2',
       patchOs2(os2Data, {
         usWeightClass: patch.weight,
         isBold: patch.isBold,
-        isItalic: patch.isItalic
+        isItalic: patch.isItalic,
+        achVendID: patch.vendorID
       })
     );
   }

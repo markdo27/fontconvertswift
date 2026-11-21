@@ -12,6 +12,7 @@ export interface MetadataDraft {
   isItalic: boolean;
   isBold: boolean;
   fileName: string;
+  vendorID?: string;
   names: FontNameFields;
 }
 
@@ -28,6 +29,7 @@ export const MetadataModal: React.FC<MetadataModalProps> = ({ font, onClose, onS
   const [isItalic, setIsItalic] = useState(font.isItalic);
   const [isBold, setIsBold] = useState(font.isBold);
   const [fileName, setFileName] = useState(font.fileName);
+  const [vendorID, setVendorID] = useState(font.vendorID || '');
   const [names, setNames] = useState<FontNameFields>(font.names);
 
   /**
@@ -75,6 +77,7 @@ export const MetadataModal: React.FC<MetadataModalProps> = ({ font, onClose, onS
       isItalic,
       isBold,
       fileName: fileName.trim() || font.fileName,
+      vendorID: vendorID.trim() || undefined,
       names: { ...names, postScriptName: sanitizePostScriptName(names.postScriptName) }
     });
     onClose();
@@ -264,11 +267,50 @@ export const MetadataModal: React.FC<MetadataModalProps> = ({ font, onClose, onS
 
       {/* ---------- attribution: the author section ---------- */}
       <div className="cell">
-        <div className="fieldset-title">
-          <Icon name="shield" /> ATTRIBUTION
+        <div className="spread">
+          <div className="fieldset-title">
+            <Icon name="shield" /> ATTRIBUTION &amp; METADATA
+          </div>
+          <div className="inline" style={{ gap: 6 }}>
+            <button
+              type="button"
+              className="btn btn--sm"
+              onClick={() => {
+                setName('designer', 'Mark Do');
+                setName('designerURL', 'https://vinafont.com');
+                setName('manufacturer', 'Vinafont');
+                setName('vendorURL', 'https://vinafont.com');
+                setVendorID('VNFN');
+                setName('version', 'Version 1.000');
+                setName('copyright', 'Copyright 2026 Mark Do (Vinafont). All rights reserved.');
+                setName('license', 'This Font Software is licensed under the SIL Open Font License, Version 1.1.');
+                setName('licenseURL', 'https://openfontlicense.org');
+              }}
+            >
+              PRESET: VINAFONT
+            </button>
+            <button
+              type="button"
+              className="btn btn--sm"
+              onClick={() => {
+                setName('designer', '');
+                setName('designerURL', '');
+                setName('manufacturer', '');
+                setName('vendorURL', '');
+                setVendorID('');
+                setName('copyright', '');
+                setName('trademark', '');
+                setName('license', '');
+                setName('licenseURL', '');
+                setName('description', '');
+              }}
+            >
+              CLEAR CREDIT
+            </button>
+          </div>
         </div>
 
-        <div className="grid-fields">
+        <div className="grid-fields" style={{ marginTop: 14 }}>
           <Field
             label="DESIGNER / AUTHOR"
             hint="ID 9"
@@ -288,6 +330,7 @@ export const MetadataModal: React.FC<MetadataModalProps> = ({ font, onClose, onS
             hint="ID 8"
             value={names.manufacturer}
             onChange={(value) => setName('manufacturer', value)}
+            placeholder="Vinafont"
           />
           <Field
             label="VENDOR URL"
@@ -295,6 +338,13 @@ export const MetadataModal: React.FC<MetadataModalProps> = ({ font, onClose, onS
             value={names.vendorURL}
             onChange={(value) => setName('vendorURL', value)}
             placeholder="https://"
+          />
+          <Field
+            label="VENDOR ID"
+            hint="OS/2.achVendID (4 chars)"
+            value={vendorID}
+            onChange={setVendorID}
+            placeholder="VNFN"
           />
         </div>
 

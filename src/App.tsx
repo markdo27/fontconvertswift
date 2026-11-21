@@ -28,7 +28,8 @@ import {
   FONT_FORMATS,
   nativeDesktopFormat,
   type FontFormat,
-  type FontItem
+  type FontItem,
+  type FontNameFields
 } from './types/font';
 
 type Toast = { id: number; message: string; kind: 'info' | 'success' | 'error' };
@@ -111,6 +112,7 @@ export default function App() {
             family: metadata.family,
             subfamily: metadata.subfamily,
             names: metadata.names,
+            vendorID: metadata.vendorID,
             weight: metadata.weight,
             isItalic: metadata.isItalic,
             isBold: metadata.isBold,
@@ -288,6 +290,7 @@ export default function App() {
         weight: draft.weight,
         isItalic: draft.isItalic,
         isBold: draft.isBold,
+        vendorID: draft.vendorID,
         names: draft.names
       });
 
@@ -297,6 +300,7 @@ export default function App() {
         weight: draft.weight,
         isItalic: draft.isItalic,
         isBold: draft.isBold,
+        vendorID: draft.vendorID,
         names: draft.names,
         fileName: replaceExtension(draft.fileName, font.targetFormat),
         sfntBuffer,
@@ -326,22 +330,30 @@ export default function App() {
         if (!result) return font;
 
         try {
-          // Only the fields the batch tool owns are passed. Designer,
-          // copyright, trademark and licence are left undefined, so they are
-          // carried through untouched rather than dropped.
+          const namesPatch: Partial<FontNameFields> = {
+            fullName: result.fullName,
+            postScriptName: result.postScriptName,
+            ...(result.metadata || {})
+          };
+
           const sfntBuffer = writeMetadataToSfnt(font.sfntBuffer, {
             family: result.family,
             subfamily: result.subfamily,
             weight: result.weight,
             isItalic: result.isItalic,
             isBold: result.isBold,
-            names: {
-              fullName: result.fullName,
-              postScriptName: result.postScriptName
-            }
+            vendorID: result.vendorID,
+            names: namesPatch
           });
 
           applied += 1;
+
+          const updatedNames: FontNameFields = {
+            ...font.names,
+            fullName: result.fullName,
+            postScriptName: result.postScriptName,
+            ...(result.metadata || {})
+          };
 
           return {
             ...font,
@@ -350,11 +362,8 @@ export default function App() {
             weight: result.weight,
             isItalic: result.isItalic,
             isBold: result.isBold,
-            names: {
-              ...font.names,
-              fullName: result.fullName,
-              postScriptName: result.postScriptName
-            },
+            vendorID: result.vendorID !== undefined ? result.vendorID : font.vendorID,
+            names: updatedNames,
             fileName: replaceExtension(result.fileName, font.targetFormat),
             sfntBuffer,
             convertedBuffer: null,
@@ -371,7 +380,7 @@ export default function App() {
       })
     );
 
-    if (applied > 0) notify(`Renamed ${applied} font${applied > 1 ? 's' : ''}`, 'success');
+    if (applied > 0) notify(`Applied changes to ${applied} font${applied > 1 ? 's' : ''}`, 'success');
     for (const problem of problems) notify(problem, 'error');
   };
 
@@ -384,6 +393,7 @@ export default function App() {
       family: metadata.family,
       subfamily: metadata.subfamily,
       names: metadata.names,
+      vendorID: metadata.vendorID,
       weight: metadata.weight,
       isItalic: metadata.isItalic,
       isBold: metadata.isBold,
